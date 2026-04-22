@@ -738,12 +738,23 @@ let lastHistoryBackend = 'indexedDB';
 
 const OUTPUT_TABS = ['t-analysis','t-name','t-icon','t-prompt','t-knowledge','t-manual','t-monetize','t-copy'];
 const MAX_HISTORY = 6;
+const CHECKPOINT_KEY = pw => `gpts_forge_checkpoint_${pw}`;
+const CHECKPOINT_TTL_MS = 1000 * 60 * 60 * 12;
+const PHASE_PLAN = [
+  {id:'overview', label:'分析と設計書タイトルを生成中', progress:12},
+  {id:'names', label:'GPTs名の候補を生成中', progress:24},
+  {id:'icons', label:'アイコン案を生成中', progress:36},
+  {id:'prompt', label:'高性能プロンプトを生成中', progress:52},
+  {id:'knowledge', label:'知識ファイルを生成中', progress:68},
+  {id:'manual', label:'活用マニュアルを生成中', progress:82},
+  {id:'sales', label:'販売設計と販売文を生成中', progress:92}
+];
 const HISTORY_DB_NAME = 'gpts_forge_histories_db';
 const HISTORY_DB_VERSION = 1;
 const HISTORY_STORE = 'histories';
 const STORAGE_KEY = pw => `gpts_forge_hist_${pw}`;
-const REQUEST_TIMEOUT_MS = 70000;
-const MAX_RETRIES = 2;
+const REQUEST_TIMEOUT_MS = 80000;
+const MAX_RETRIES = 3;
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 const RETRYABLE_TEXTS = ['timeout','timed out','temporarily unavailable','unavailable','overloaded','resource exhausted','try again','再実行','タイムアウト','不安定','有効な出力が返りませんでした','JSON出力が壊れています'];
 const GEMINI_MODEL = 'gemini-2.5-flash';
@@ -888,7 +899,7 @@ function sleep(ms){
 }
 
 function backoffMs(attempt){
-  return Math.round((1200 * Math.pow(2, attempt)) + (Math.random() * 350));
+  return Math.round((1600 * Math.pow(2, attempt)) + (Math.random() * 650));
 }
 
 function escHtml(s){
@@ -1465,70 +1476,169 @@ ${ctx}
 - 抽象論・一般論は禁止
 - 販売・実装・運用ですぐ使える完成度
 - 自然な日本語。AI臭い定型文は禁止
-- 高単価商品として見せても弱くならない濃さで書く`;
+- 高単価商品として見せても弱くならない濃さで書く
+- 返答は必ず JSON のみ`;
 
-  if(phase === 'core'){
+  if(phase === 'overview'){
     return {
       contents:[{parts:[{text:`${baseRules}
 
-今回は「分析・名前・アイコン・プロンプト・マネタイズ設計」だけを出力してください。
+今回は「設計書タイトル」と「分析」だけを出力してください。
 厳守:
-- docTitle は設計書タイトル
-- analysis は入力情報を踏まえた詳細分析
-- names は3案
-- icons は3案。各案にコンセプト説明、Gemini向け日本語画像プロンプト、英語画像プロンプトを含める
-- promptBlocks は3本
-  1) GPTs作成画面に貼りやすいコピペ専用の作成項目一覧
-  2) 本番運用レベルの高性能システムプロンプト
-  3) 初回ヒアリング設計 + 会話スターター + 質問テンプレ
-- monetize はこのテーマに特化した販売・単価設計・差別化の要点
+- docTitle は販売・配布にも耐える設計書タイトル
+- analysis は市場価値、ターゲット心理、差別化、強み、販売勝ち筋まで含む詳細分析
+- 無駄な前置きは禁止
 
 JSON以外は返さないでください。`}]}],
       generationConfig:{
-        temperature:0.65,
-        topP:0.9,
-        maxOutputTokens:7000,
+        temperature:0.58,
+        topP:0.88,
+        maxOutputTokens:2400,
         responseMimeType:'application/json',
         responseSchema:{
           type:'OBJECT',
-          required:['docTitle','analysis','names','icons','promptBlocks','monetize'],
+          required:['docTitle','analysis'],
           properties:{
             docTitle:{type:'STRING'},
-            analysis:{type:'STRING'},
-            names:{type:'ARRAY',items:{type:'OBJECT',required:['title','content'],properties:{title:{type:'STRING'},content:{type:'STRING'}}}},
-            icons:{type:'ARRAY',items:{type:'OBJECT',required:['title','content','iconJapanesePrompt','iconEnglishPrompt'],properties:{title:{type:'STRING'},content:{type:'STRING'},iconJapanesePrompt:{type:'STRING'},iconEnglishPrompt:{type:'STRING'}}}},
-            promptBlocks:{type:'ARRAY',items:{type:'OBJECT',required:['title','content'],properties:{title:{type:'STRING'},content:{type:'STRING'}}}},
-            monetize:{type:'STRING'}
+            analysis:{type:'STRING'}
           }
         }
       }
     };
   }
 
-  if(phase === 'assets'){
+  if(phase === 'names'){
     return {
       contents:[{parts:[{text:`${baseRules}
 
-今回は「知識ファイル・マニュアル」だけを出力してください。
+今回は「GPTs名の候補」だけを出力してください。
 厳守:
-- knowledgeFiles は3本
-- manualFiles は2本以上
-- knowledgeFiles[*].content はそのまま知識ファイルにできる本文
-- manualFiles[*].content は商品として価値が出る密度
-- 1本は購入者向け活用マニュアル、1本は販売者向け高単価化マニュアル
-- fileName は日本語でも英数字でもよいが保存しやすい名称
+- names は3案
+- 各案とも、名前・コンセプト・売れる理由・向いている世界観まで具体的に
 
 JSON以外は返さないでください。`}]}],
       generationConfig:{
-        temperature:0.62,
+        temperature:0.72,
         topP:0.9,
-        maxOutputTokens:7800,
+        maxOutputTokens:1800,
         responseMimeType:'application/json',
         responseSchema:{
           type:'OBJECT',
-          required:['knowledgeFiles','manualFiles'],
+          required:['names'],
           properties:{
-            knowledgeFiles:{type:'ARRAY',items:{type:'OBJECT',required:['title','fileName','content'],properties:{title:{type:'STRING'},fileName:{type:'STRING'},content:{type:'STRING'}}}},
+            names:{type:'ARRAY',items:{type:'OBJECT',required:['title','content'],properties:{title:{type:'STRING'},content:{type:'STRING'}}}}
+          }
+        }
+      }
+    };
+  }
+
+  if(phase === 'icons'){
+    return {
+      contents:[{parts:[{text:`${baseRules}
+
+今回は「アイコン案」だけを出力してください。
+厳守:
+- icons は3案
+- 各案に title, content, iconJapanesePrompt, iconEnglishPrompt を含める
+- content は世界観・色・訴求意図・販売面の強みまで書く
+- 画像プロンプトはそのまま生成に投げやすい精度で書く
+
+JSON以外は返さないでください。`}]}],
+      generationConfig:{
+        temperature:0.68,
+        topP:0.9,
+        maxOutputTokens:2600,
+        responseMimeType:'application/json',
+        responseSchema:{
+          type:'OBJECT',
+          required:['icons'],
+          properties:{
+            icons:{type:'ARRAY',items:{type:'OBJECT',required:['title','content','iconJapanesePrompt','iconEnglishPrompt'],properties:{title:{type:'STRING'},content:{type:'STRING'},iconJapanesePrompt:{type:'STRING'},iconEnglishPrompt:{type:'STRING'}}}}
+          }
+        }
+      }
+    };
+  }
+
+  if(phase === 'prompt'){
+    return {
+      contents:[{parts:[{text:`${baseRules}
+
+今回は「プロンプト群」だけを出力してください。
+厳守:
+- promptBlocks は3本
+- 1本目: GPTs作成画面にそのまま貼りやすいコピペ専用の作成項目一覧
+- 2本目: 本番運用レベルの高性能システムプロンプト
+- 3本目: 初回ヒアリング設計 + 会話スターター + 質問テンプレ
+- 特に2本目は、役割・目的・入力整理・必須ワークフロー・知識ファイル利用規則・出力ルール・品質チェック・不足情報時の動き・禁止事項・セルフレビューまで含める
+
+JSON以外は返さないでください。`}]}],
+      generationConfig:{
+        temperature:0.55,
+        topP:0.86,
+        maxOutputTokens:5200,
+        responseMimeType:'application/json',
+        responseSchema:{
+          type:'OBJECT',
+          required:['promptBlocks'],
+          properties:{
+            promptBlocks:{type:'ARRAY',items:{type:'OBJECT',required:['title','content'],properties:{title:{type:'STRING'},content:{type:'STRING'}}}}
+          }
+        }
+      }
+    };
+  }
+
+  if(phase === 'knowledge'){
+    return {
+      contents:[{parts:[{text:`${baseRules}
+
+今回は「知識ファイル」だけを出力してください。
+厳守:
+- knowledgeFiles は3本
+- knowledgeFiles[*].content はそのまま知識ファイルとして投入できる本文
+- 説明ではなくファイル本文として完成させる
+- title と fileName は保存しやすく分かりやすい名前
+
+JSON以外は返さないでください。`}]}],
+      generationConfig:{
+        temperature:0.56,
+        topP:0.88,
+        maxOutputTokens:5200,
+        responseMimeType:'application/json',
+        responseSchema:{
+          type:'OBJECT',
+          required:['knowledgeFiles'],
+          properties:{
+            knowledgeFiles:{type:'ARRAY',items:{type:'OBJECT',required:['title','fileName','content'],properties:{title:{type:'STRING'},fileName:{type:'STRING'},content:{type:'STRING'}}}}
+          }
+        }
+      }
+    };
+  }
+
+  if(phase === 'manual'){
+    return {
+      contents:[{parts:[{text:`${baseRules}
+
+今回は「活用マニュアル」だけを出力してください。
+厳守:
+- manualFiles は必ず2本
+- 1本は購入者向け活用マニュアル
+- 1本は販売者向け高単価化マニュアル
+- manualFiles[*].content は商品として渡せる密度で、具体的な活用手順まで含める
+
+JSON以外は返さないでください。`}]}],
+      generationConfig:{
+        temperature:0.56,
+        topP:0.88,
+        maxOutputTokens:5200,
+        responseMimeType:'application/json',
+        responseSchema:{
+          type:'OBJECT',
+          required:['manualFiles'],
+          properties:{
             manualFiles:{type:'ARRAY',items:{type:'OBJECT',required:['title','fileName','content'],properties:{title:{type:'STRING'},fileName:{type:'STRING'},content:{type:'STRING'}}}}
           }
         }
@@ -1539,23 +1649,25 @@ JSON以外は返さないでください。`}]}],
   return {
     contents:[{parts:[{text:`${baseRules}
 
-今回は「販売文・訴求軸」だけを出力してください。
+今回は「マネタイズ設計・販売文・訴求軸」だけを出力してください。
 厳守:
+- monetize は単価設計・差別化・導線・販売勝ち筋を具体化
 - copyAngles と titleIdeas は各5件以上
-- productDescription は販売ページに貼れる密度
+- productDescription は販売ページにそのまま貼れる密度
 - benefits / trustPhrases は弱くしない
 - fitFor / notFitFor / ctaSoft / ctaStrong も具体的に
 
 JSON以外は返さないでください。`}]}],
     generationConfig:{
-      temperature:0.7,
+      temperature:0.64,
       topP:0.9,
-      maxOutputTokens:4200,
+      maxOutputTokens:3600,
       responseMimeType:'application/json',
       responseSchema:{
         type:'OBJECT',
-        required:['copyAngles','titleIdeas','productDescription','benefits','fitFor','notFitFor','ctaSoft','ctaStrong','trustPhrases'],
+        required:['monetize','copyAngles','titleIdeas','productDescription','benefits','fitFor','notFitFor','ctaSoft','ctaStrong','trustPhrases'],
         properties:{
+          monetize:{type:'STRING'},
           copyAngles:{type:'ARRAY',items:{type:'STRING'}},
           titleIdeas:{type:'ARRAY',items:{type:'STRING'}},
           productDescription:{type:'STRING'},
@@ -1594,7 +1706,9 @@ async function callGeminiJson(apiKey, payload, label=''){
         const mapped = mapGeminiError(resp.status, message);
         if(RETRYABLE_STATUS.has(resp.status) && attempt < MAX_RETRIES){
           console.warn(`Gemini retry [${label}]`, resp.status, message);
-          await sleep(backoffMs(attempt));
+          const retryAfterHeader = Number(resp.headers.get('retry-after') || 0);
+          const waitMs = resp.status === 429 ? Math.max(backoffMs(attempt) + 1200, retryAfterHeader * 1000 || 0) : backoffMs(attempt);
+          await sleep(waitMs);
           continue;
         }
         throw new Error(mapped);
@@ -1751,6 +1865,85 @@ function collectForm(){
   };
 }
 
+
+function normalizeRequestText(value, maxLen){
+  return String(value || '')
+    .replace(/\r/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    .slice(0, maxLen);
+}
+
+function prepareFormForRequest(f){
+  return {
+    ...f,
+    theme: normalizeRequestText(f.theme, 180),
+    target: normalizeRequestText(f.target, 220),
+    detail: normalizeRequestText(f.detail, 1000),
+    features: normalizeRequestText(f.features, 1000),
+    knowledge: normalizeRequestText(f.knowledge, 1000),
+    research: normalizeRequestText(f.research, 1800)
+  };
+}
+
+function makeStableFingerprint(value){
+  const str = typeof value === 'string' ? value : JSON.stringify(value);
+  let hash = 2166136261;
+  for(let i = 0; i < str.length; i++){
+    hash ^= str.charCodeAt(i);
+    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+  }
+  return `fp_${(hash >>> 0).toString(16)}`;
+}
+
+function getCheckpointKey(){
+  return currentPw ? CHECKPOINT_KEY(currentPw) : '';
+}
+
+function loadRunCheckpoint(fingerprint){
+  const key = getCheckpointKey();
+  if(!key) return null;
+  try{
+    const raw = localStorage.getItem(key);
+    if(!raw) return null;
+    const parsed = JSON.parse(raw);
+    if(!parsed || parsed.fingerprint !== fingerprint) return null;
+    if(!parsed.updatedAt || (Date.now() - parsed.updatedAt) > CHECKPOINT_TTL_MS){
+      localStorage.removeItem(key);
+      return null;
+    }
+    return parsed;
+  }catch(err){
+    console.warn('checkpoint load failed', err);
+    return null;
+  }
+}
+
+function saveRunCheckpoint(checkpoint){
+  const key = getCheckpointKey();
+  if(!key) return false;
+  try{
+    localStorage.setItem(key, JSON.stringify(checkpoint));
+    return true;
+  }catch(err){
+    console.warn('checkpoint save failed', err);
+    return false;
+  }
+}
+
+function clearRunCheckpoint(){
+  const key = getCheckpointKey();
+  if(!key) return;
+  try{ localStorage.removeItem(key); }catch{}
+}
+
+function findPhaseMeta(phaseId){
+  return PHASE_PLAN.find(p => p.id === phaseId) || {id: phaseId, label: phaseId, progress: 0};
+}
+
 function buildCtx(f){
   const um={both:'自分用・販売用の両方',self:'自分用のみ',sell:'販売用のみ'};
   const pm={low:'低単価（〜3,000円）',mid:'中価格（3,000〜15,000円）',high:'高価格帯（15,000円〜）'};
@@ -1808,9 +2001,17 @@ async function generate(){
   const apiKey=document.getElementById('apiKey').value.trim();
   if(!apiKey){showErr('Gemini APIキーを入力してください。');return;}
   if(!apiKey.startsWith('AIza')){showErr('Gemini APIキーの形式が不正です。Google AI Studioで発行した AIza... から始まるキーを入力してください。');return;}
-  const f=collectForm();
-  if(!f.theme){showErr('GPTsのテーマを入力してください。');return;}
-  if(!f.target){showErr('想定ターゲットを入力してください。');return;}
+
+  const rawForm=collectForm();
+  if(!rawForm.theme){showErr('GPTsのテーマを入力してください。');return;}
+  if(!rawForm.target){showErr('想定ターゲットを入力してください。');return;}
+
+  const requestForm = prepareFormForRequest(rawForm);
+  const ctx = buildCtx(requestForm);
+  const fingerprint = makeStableFingerprint({pw: currentPw, form: requestForm, model: GEMINI_MODEL, version: 'stable-v2'});
+  let checkpoint = loadRunCheckpoint(fingerprint);
+  let mergedData = checkpoint?.data ? normalizeMergedData(checkpoint.data) : {};
+  const completed = new Set(Array.isArray(checkpoint?.completedPhases) ? checkpoint.completedPhases : []);
 
   hideErr();
   clearOutput();
@@ -1820,28 +2021,47 @@ async function generate(){
   startProg();
 
   try{
-    const ctx = buildCtx(f);
+    if(checkpoint && completed.size){
+      setLoaderState(8, '前回の途中結果を確認中');
+      await sleep(220);
+    }
 
-    setLoaderState(12, '分析・ブランド設計を生成中');
-    const core = await callGeminiJson(apiKey, buildPhasePayload(ctx, 'core'), 'core');
+    for(const phase of PHASE_PLAN){
+      if(completed.has(phase.id)){
+        setLoaderState(phase.progress, `${phase.label}（保存済みを再利用）`);
+        await sleep(180);
+        continue;
+      }
 
-    setLoaderState(46, '知識ファイルとマニュアルを生成中');
-    const assets = await callGeminiJson(apiKey, buildPhasePayload(ctx, 'assets'), 'assets');
+      setLoaderState(phase.progress, phase.label);
+      const result = await callGeminiJson(apiKey, buildPhasePayload(ctx, phase.id), phase.id);
+      mergedData = normalizeMergedData({ ...mergedData, ...result });
+      completed.add(phase.id);
+      saveRunCheckpoint({
+        fingerprint,
+        pw: currentPw,
+        form: requestForm,
+        data: mergedData,
+        completedPhases: [...completed],
+        updatedAt: Date.now()
+      });
+      await sleep(240);
+    }
 
-    setLoaderState(78, '販売文と訴求軸を生成中');
-    const sales = await callGeminiJson(apiKey, buildPhasePayload(ctx, 'sales'), 'sales');
-
-    setLoaderState(92, '最終整形中');
-    const data = normalizeMergedData({ ...core, ...assets, ...sales });
-
+    setLoaderState(96, '最終整形中');
+    const data = normalizeMergedData(mergedData);
     renderAllTabs(data);
-    document.getElementById('output-title').textContent = data.docTitle || `${f.theme} — 設計書`;
+    document.getElementById('output-title').textContent = data.docTitle || `${rawForm.theme} — 設計書`;
     document.getElementById('output-area').classList.add('on');
     document.getElementById('output-area').scrollIntoView({behavior:'smooth',block:'start'});
 
-    await addHistory(buildHistoryEntry(f.theme, f, data));
+    await addHistory(buildHistoryEntry(rawForm.theme, rawForm, data));
+    clearRunCheckpoint();
   }catch(err){
-    showErr(err?.message || '生成中にエラーが発生しました。');
+    const message = err?.message || '生成中にエラーが発生しました。';
+    showErr(`${message}
+
+同じ入力のまま再実行すると、保存できている途中フェーズから自動再開します。`);
   }finally{
     endProg();
     setTimeout(()=>{document.getElementById('loading').classList.remove('on');}, 300);
