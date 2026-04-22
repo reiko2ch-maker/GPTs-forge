@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -376,7 +375,7 @@ select option{background:#1b2138}
 
 .ob{
   background:linear-gradient(145deg,rgba(18,14,36,.9) 0%,rgba(12,9,28,.95) 100%);
-  border:1px solid rgba(180,160,255,.055);border-radius:16px;margin-bottom:14px;overflow:hidden;box-shadow:0 2px 16px rgba(0,0,0,.3);
+  border:1px solid rgba(180,160,255,.055);border-radius:16px;margin-bottom:14px;overflow:hidden;box-shadow:0 2px 16px rgba(0,0,0,.3);position:relative;
 }
 .ob::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(200,168,75,.12),transparent);pointer-events:none}
 .ob-head{
@@ -730,13 +729,23 @@ select option{background:#1b2138}
 'use strict';
 
 let currentPw = null;
-const STORAGE_KEY = pw => `gpts_forge_hist_${pw}`;
-const MAX_HISTORY = 10;
+let currentHistoryCache = [];
 let blockId = 0;
 let blockRegistry = {};
+let progTimer = null;
+let historyDbPromise = null;
+let lastHistoryBackend = 'indexedDB';
 
 const OUTPUT_TABS = ['t-analysis','t-name','t-icon','t-prompt','t-knowledge','t-manual','t-monetize','t-copy'];
-const STEPS = ['入力情報を整理中','市場と競合を解析中','ブランド案を構築中','高性能プロンプトを設計中','知識ファイルを執筆中','活用マニュアルを執筆中','販売導線を設計中','最終整形中'];
+const MAX_HISTORY = 6;
+const HISTORY_DB_NAME = 'gpts_forge_histories_db';
+const HISTORY_DB_VERSION = 1;
+const HISTORY_STORE = 'histories';
+const STORAGE_KEY = pw => `gpts_forge_hist_${pw}`;
+const REQUEST_TIMEOUT_MS = 70000;
+const MAX_RETRIES = 2;
+const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+const RETRYABLE_TEXTS = ['timeout','timed out','temporarily unavailable','unavailable','overloaded','resource exhausted','try again','再実行','タイムアウト','不安定','有効な出力が返りませんでした','JSON出力が壊れています'];
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const GENERATE_ENDPOINT = apiKey => `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
@@ -744,11 +753,9 @@ const GENERATE_ENDPOINT = apiKey => `https://generativelanguage.googleapis.com/v
   const canvas = document.getElementById('canvas');
   const ctx = canvas.getContext('2d');
   let W, H;
-  function resize(){W=canvas.width=window.innerWidth;H=canvas.height=window.innerHeight}
-  window.addEventListener('resize', resize); resize();
-  const BG='#06040f';
-  const STAR_COUNT=340;
-  const stars=[];
+  let stars = [];
+  const shooters = [];
+
   function randColor(){
     const r=Math.random();
     if(r<.50) return [220,215,255,1.0];
@@ -757,12 +764,35 @@ const GENERATE_ENDPOINT = apiKey => `https://generativelanguage.googleapis.com/v
     if(r<.95) return [255,180,200,0.8];
     return [255,255,255,1.0];
   }
-  for(let i=0;i<STAR_COUNT;i++){
-    const [cr,cg,cb,cm]=randColor();
-    const isBright=Math.random()<0.12;
-    stars.push({x:Math.random()*W,y:Math.random()*H,r:isBright?Math.random()*1.8+0.8:Math.random()*1.2+0.15,base:isBright?Math.random()*0.5+0.4:Math.random()*0.45+0.1,cr,cg,cb,cm,twinkleSpeed:Math.random()*0.03+0.004,twinklePhase:Math.random()*Math.PI*2,isBright});
+
+  function buildStars(){
+    const count = window.innerWidth < 560 ? 220 : 340;
+    stars = [];
+    for(let i=0;i<count;i++){
+      const [cr,cg,cb,cm]=randColor();
+      const isBright=Math.random()<0.12;
+      stars.push({
+        x:Math.random()*W,
+        y:Math.random()*H,
+        r:isBright?Math.random()*1.8+0.8:Math.random()*1.2+0.15,
+        base:isBright?Math.random()*0.5+0.4:Math.random()*0.45+0.1,
+        cr,cg,cb,cm,
+        twinkleSpeed:Math.random()*0.03+0.004,
+        twinklePhase:Math.random()*Math.PI*2,
+        isBright
+      });
+    }
   }
-  const shooters=[];
+
+  function resize(){
+    W=canvas.width=window.innerWidth;
+    H=canvas.height=window.innerHeight;
+    buildStars();
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  const BG='#06040f';
   function spawnShooter(){
     const angle=(Math.random()*35+10)*(Math.PI/180);
     const flip=Math.random()<.5?1:-1;
@@ -770,10 +800,11 @@ const GENERATE_ENDPOINT = apiKey => `https://generativelanguage.googleapis.com/v
     const len=Math.random()*260+120;
     let sx,sy;
     if(Math.random()<.65){sx=Math.random()*W;sy=-10}else{sx=flip>0?-10:W+10;sy=Math.random()*H*0.55}
-    shooters.push({x:sx,y:sy,vx:Math.cos(angle)*speed*flip,vy:Math.sin(angle)*speed,len,life:0,maxLife:Math.round(len/speed)+14,isGold:Math.random()<.4,width:Math.random()*1.5+0.8})
+    shooters.push({x:sx,y:sy,vx:Math.cos(angle)*speed*flip,vy:Math.sin(angle)*speed,len,life:0,maxLife:Math.round(len/speed)+14,isGold:Math.random()<.4,width:Math.random()*1.5+0.8});
   }
   [600,2200,4500].forEach(t=>setTimeout(spawnShooter,t));
-  setInterval(()=>{if(Math.random()<.75) spawnShooter()},2200);
+  setInterval(()=>{if(Math.random()<.75) spawnShooter();},2200);
+
   function drawStar(s,t){
     const flicker=Math.sin(t*s.twinkleSpeed+s.twinklePhase);
     const a=Math.max(0,Math.min(1,s.base+flicker*0.28))*s.cm;
@@ -798,6 +829,7 @@ const GENERATE_ENDPOINT = apiKey => `https://generativelanguage.googleapis.com/v
     }
     ctx.beginPath();ctx.arc(s.x,s.y,s.r,0,Math.PI*2);ctx.fillStyle=`rgba(${s.cr},${s.cg},${s.cb},${a.toFixed(3)})`;ctx.fill();
   }
+
   function drawShooter(sh){
     const prog=sh.life/sh.maxLife;
     const headA=Math.max(0,1-prog*1.1);
@@ -823,6 +855,7 @@ const GENERATE_ENDPOINT = apiKey => `https://generativelanguage.googleapis.com/v
       ctx.beginPath();ctx.arc(sh.x,sh.y,6,0,Math.PI*2);ctx.fillStyle=hgrd;ctx.fill();
     }
   }
+
   let t=0;
   function loop(){
     ctx.fillStyle=BG;ctx.fillRect(0,0,W,H);
@@ -842,6 +875,70 @@ const GENERATE_ENDPOINT = apiKey => `https://generativelanguage.googleapis.com/v
 const pinMaster=document.getElementById('pin-master');
 const pinSlots=[...document.querySelectorAll('.pin-slot')];
 const pinWrap=document.querySelector('.login-pin-wrap');
+
+document.querySelectorAll('.chip').forEach(chip=>{
+  chip.addEventListener('click',()=>{
+    const cb=chip.querySelector('input[type=checkbox]');
+    setTimeout(()=>chip.classList.toggle('on', cb.checked),0);
+  });
+});
+
+function sleep(ms){
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function backoffMs(attempt){
+  return Math.round((1200 * Math.pow(2, attempt)) + (Math.random() * 350));
+}
+
+function escHtml(s){
+  return String(s || '')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+}
+
+function safeJsonClone(obj){
+  try{return JSON.parse(JSON.stringify(obj));}catch{return null;}
+}
+
+function cloneWithStringLimit(value, limit){
+  if(typeof value === 'string'){
+    return value.length > limit ? `${value.slice(0, limit)}\n\n[履歴軽量化のため一部省略]` : value;
+  }
+  if(Array.isArray(value)) return value.map(v => cloneWithStringLimit(v, limit));
+  if(value && typeof value === 'object'){
+    const out = {};
+    for(const [k,v] of Object.entries(value)) out[k] = cloneWithStringLimit(v, limit);
+    return out;
+  }
+  return value;
+}
+
+function sanitizeFileName(name){
+  return String(name || 'document')
+    .replace(/[\\/:*?"<>|]/g,' ')
+    .replace(/\s+/g,' ')
+    .trim()
+    .slice(0,80) || 'document';
+}
+
+function setValue(id,val){
+  if(typeof val!=='undefined' && document.getElementById(id)) document.getElementById(id).value=val||'';
+}
+
+function getChecked(groupId){
+  return [...document.querySelectorAll(`#${groupId} input:checked`)].map(c=>c.value).join('、') || 'なし';
+}
+
+function setChips(groupId, values){
+  document.querySelectorAll(`#${groupId} input[type=checkbox]`).forEach(cb=>{
+    cb.checked=values.includes(cb.value);
+    cb.closest('.chip').classList.toggle('on', cb.checked);
+  });
+}
 
 function renderPinSlots(){
   const value=(pinMaster.value||'').replace(/\D/g,'').slice(0,8);
@@ -869,17 +966,18 @@ pinWrap.addEventListener('click', ()=>pinMaster.focus());
 function checkPinComplete(){
   document.getElementById('login-btn').disabled = ((pinMaster.value||'').replace(/\D/g,'').length !== 8);
 }
+
 function getPinValue(){
   return (pinMaster.value||'').replace(/\D/g,'').slice(0,8);
 }
 
-function doLogin(){
+async function doLogin(){
   const pw=getPinValue();
   if(pw.length!==8 || !/^\d+$/.test(pw)){
     const el=document.getElementById('login-error');
     el.textContent='8桁の数字を正しく入力してください';
     el.classList.add('show');
-    setTimeout(()=>{el.classList.remove('show');el.textContent=''},2500);
+    setTimeout(()=>{el.classList.remove('show');el.textContent='';},2500);
     pinMaster.focus();
     return;
   }
@@ -888,10 +986,12 @@ function doLogin(){
   document.getElementById('app').classList.add('show');
   document.getElementById('user-initial').textContent=pw.slice(0,2);
   document.getElementById('user-label').textContent=`ID: ${pw.slice(0,4)}****`;
-  renderHistory();
+  await renderHistory();
 }
+
 function doLogout(){
   currentPw=null;
+  currentHistoryCache=[];
   document.getElementById('app').classList.remove('show');
   document.getElementById('app').style.display='none';
   setTimeout(()=>{
@@ -904,28 +1004,171 @@ function doLogout(){
   },100);
 }
 
-function getHistory(){
+function openHistoryDb(){
+  if(historyDbPromise) return historyDbPromise;
+  historyDbPromise = new Promise((resolve, reject) => {
+    if(!('indexedDB' in window)){
+      reject(new Error('IndexedDB unavailable'));
+      return;
+    }
+    const req = indexedDB.open(HISTORY_DB_NAME, HISTORY_DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if(!db.objectStoreNames.contains(HISTORY_STORE)){
+        const store = db.createObjectStore(HISTORY_STORE, { keyPath: 'id' });
+        store.createIndex('pw', 'pw', { unique: false });
+        store.createIndex('createdAt', 'createdAt', { unique: false });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error('IndexedDB open failed'));
+  });
+  return historyDbPromise;
+}
+
+async function idbGetHistory(pw){
+  const db = await openHistoryDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(HISTORY_STORE, 'readonly');
+    const store = tx.objectStore(HISTORY_STORE);
+    const idx = store.index('pw');
+    const req = idx.getAll(pw);
+    req.onsuccess = () => {
+      const list = Array.isArray(req.result) ? req.result : [];
+      list.sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+      resolve(list.slice(0, MAX_HISTORY));
+    };
+    req.onerror = () => reject(req.error || new Error('IndexedDB get failed'));
+  });
+}
+
+async function idbPutHistory(entry){
+  const db = await openHistoryDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(HISTORY_STORE, 'readwrite');
+    const store = tx.objectStore(HISTORY_STORE);
+    store.put(entry);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error || new Error('IndexedDB put failed'));
+    tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
+  });
+}
+
+async function idbDeleteHistory(id){
+  const db = await openHistoryDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(HISTORY_STORE, 'readwrite');
+    tx.objectStore(HISTORY_STORE).delete(id);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error || new Error('IndexedDB delete failed'));
+    tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
+  });
+}
+
+async function idbTrimHistory(pw){
+  const list = await idbGetHistory(pw);
+  const overflow = list.slice(MAX_HISTORY);
+  for(const item of overflow){
+    await idbDeleteHistory(item.id);
+  }
+}
+
+function getHistoryLs(){
   if(!currentPw) return [];
-  try{return JSON.parse(localStorage.getItem(STORAGE_KEY(currentPw))||'[]')}catch{return []}
+  try{
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY(currentPw)) || '[]');
+    return Array.isArray(parsed) ? parsed.slice(0, MAX_HISTORY) : [];
+  }catch{
+    return [];
+  }
 }
-function saveHistory(list){if(currentPw) localStorage.setItem(STORAGE_KEY(currentPw), JSON.stringify(list))}
-function addHistory(entry){
-  const list=getHistory();
-  list.unshift(entry);
-  if(list.length>MAX_HISTORY) list.pop();
-  saveHistory(list);
-  renderHistory();
+
+function saveHistoryLs(list){
+  if(!currentPw) return false;
+  let work = safeJsonClone(list) || [];
+  while(work.length){
+    try{
+      localStorage.setItem(STORAGE_KEY(currentPw), JSON.stringify(work.slice(0, MAX_HISTORY)));
+      return true;
+    }catch(err){
+      work.pop();
+    }
+  }
+  try{localStorage.removeItem(STORAGE_KEY(currentPw));}catch{}
+  return false;
 }
-function deleteHistory(idx){
-  const list=getHistory();
-  list.splice(idx,1);
-  saveHistory(list);
-  renderHistory();
+
+async function getHistory(){
+  if(!currentPw) return [];
+  try{
+    const list = await idbGetHistory(currentPw);
+    lastHistoryBackend = 'indexedDB';
+    return list;
+  }catch(err){
+    console.warn('IndexedDB history unavailable, fallback to localStorage.', err);
+    lastHistoryBackend = 'localStorage';
+    return getHistoryLs();
+  }
 }
-function toggleHistory(){document.getElementById('history-drawer').classList.toggle('open')}
-function renderHistory(){
-  const list=getHistory();
-  document.getElementById('hist-count').textContent=list.length;
+
+async function addHistory(entry){
+  if(!currentPw) return false;
+  const normalized = safeJsonClone(entry) || entry;
+  try{
+    await idbPutHistory(normalized);
+    const list = await idbGetHistory(currentPw);
+    if(list.length > MAX_HISTORY){
+      for(const item of list.slice(MAX_HISTORY)) await idbDeleteHistory(item.id);
+    }
+    lastHistoryBackend = 'indexedDB';
+    await renderHistory();
+    return true;
+  }catch(err){
+    console.warn('IndexedDB save failed, fallback to localStorage.', err);
+    lastHistoryBackend = 'localStorage';
+    const compactEntry = {
+      ...normalized,
+      form: cloneWithStringLimit(normalized.form, 2000),
+      data: cloneWithStringLimit(normalized.data, 8000)
+    };
+    const list = getHistoryLs();
+    list.unshift(compactEntry);
+    const ok = saveHistoryLs(list.slice(0, MAX_HISTORY));
+    await renderHistory();
+    return ok;
+  }
+}
+
+async function deleteHistory(idx){
+  const item = currentHistoryCache[idx];
+  if(!item) return;
+  try{
+    if(lastHistoryBackend === 'indexedDB'){
+      await idbDeleteHistory(item.id);
+    }else{
+      const list = getHistoryLs();
+      const next = list.filter(x => x.id !== item.id);
+      saveHistoryLs(next);
+    }
+  }catch(err){
+    console.warn('history delete failed', err);
+    const list = getHistoryLs();
+    const next = list.filter(x => x.id !== item.id);
+    saveHistoryLs(next);
+  }
+  await renderHistory();
+}
+
+async function toggleHistory(){
+  const drawer = document.getElementById('history-drawer');
+  drawer.classList.toggle('open');
+  if(drawer.classList.contains('open')) await renderHistory();
+}
+
+async function renderHistory(){
+  const list = await getHistory();
+  currentHistoryCache = list;
+  document.getElementById('hist-count').textContent = list.length;
   const el=document.getElementById('history-list');
   if(!list.length){
     el.innerHTML='<div class="history-empty">まだ履歴がありません</div>';
@@ -935,15 +1178,15 @@ function renderHistory(){
     <div class="history-item" onclick="restoreHistory(${i})">
       <div class="history-item-left">
         <div class="history-item-theme">${escHtml(item.theme||'無題')}</div>
-        <div class="history-item-meta">${escHtml(item.date)} · ${escHtml(item.sections||'?')}セクション</div>
+        <div class="history-item-meta">${escHtml(item.date || '')} · ${escHtml(item.sections||'?')}セクション</div>
       </div>
       <button class="btn-del" onclick="event.stopPropagation();deleteHistory(${i})">削除</button>
     </div>
   `).join('');
 }
-function restoreHistory(idx){
-  const list=getHistory();
-  const item=list[idx];
+
+async function restoreHistory(idx){
+  const item=currentHistoryCache[idx];
   if(!item || !item.data) return;
   const f=item.form||{};
   setValue('f_theme',f.theme);
@@ -955,145 +1198,23 @@ function restoreHistory(idx){
   setValue('f_features',f.features);
   setValue('f_knowledge',f.knowledge);
   setValue('f_research',f.research);
-  if(f.direction) setChips('cg-dir', f.direction.split('、'));
-  if(f.vibe) setChips('cg-vibe', f.vibe.split('、'));
-  if(f.media) setChips('cg-media', f.media.split('、'));
+  if(f.direction) setChips('cg-dir', String(f.direction).split('、'));
+  if(f.vibe) setChips('cg-vibe', String(f.vibe).split('、'));
+  if(f.media) setChips('cg-media', String(f.media).split('、'));
   clearOutput();
-  renderAllTabs(item.data);
+  renderAllTabs(normalizeMergedData(item.data));
   document.getElementById('output-title').textContent=item.data.docTitle || item.theme || '設計書';
   document.getElementById('output-area').classList.add('on');
   document.getElementById('history-drawer').classList.remove('open');
   document.getElementById('output-area').scrollIntoView({behavior:'smooth',block:'start'});
 }
 
-function setValue(id,val){
-  if(typeof val!=='undefined' && document.getElementById(id)) document.getElementById(id).value=val||'';
-}
-function setChips(groupId, values){
-  document.querySelectorAll(`#${groupId} input[type=checkbox]`).forEach(cb=>{
-    cb.checked=values.includes(cb.value);
-    cb.closest('.chip').classList.toggle('on', cb.checked);
-  });
-}
-document.querySelectorAll('.chip').forEach(chip=>{
-  chip.addEventListener('click',()=>{
-    const cb=chip.querySelector('input[type=checkbox]');
-    setTimeout(()=>chip.classList.toggle('on', cb.checked),0);
-  });
-});
-
-function loadSample(){
-  setValue('f_theme','ココナラ×AIマネタイズ支援GPTs');
-  setValue('f_target','副業初心者・ゼロイチ挑戦中の会社員（20〜40代）');
-  setValue('f_usage','both');
-  setValue('f_price','high');
-  setValue('f_level','beginner');
-  setValue('f_detail','ユーザーがジャンルを入力するだけで、ココナラの出品タイトル・説明文・価格設定・ポートフォリオ案まで自動で提案。高単価商品化まで見据えたい。');
-  setValue('f_features','最初にユーザーへ5問ヒアリング。出力はコピペで使える形式。知識ファイルと販売マニュアルはそのまま商品化しやすい密度で。');
-  setValue('f_knowledge','ココナラ人気カテゴリー一覧、売れる出品文の型、プロフィール書き方ガイド、自分の実績・強みの整理');
-  setValue('f_research','noteで「ココナラ 副業」検索では月収10万円系が多い。Brain上の「GPTs販売」商品は3〜5千円が主流。「ゼロから副業」「AI活用」「完全初心者OK」がキーワードとして刺さっている。ターゲットの悩み：何から始めるか分からない、文章が書けない、値段設定が分からない。');
-  setChips('cg-dir',['収益化','実用性','高性能','差別化']);
-  setChips('cg-vibe',['高級感','権威性','プロフェッショナル']);
-  setChips('cg-media',['ココナラ','note','Brain','Threads・X']);
-}
-
-function getChecked(groupId){return [...document.querySelectorAll(`#${groupId} input:checked`)].map(c=>c.value).join('、') || 'なし'}
-function collectForm(){
-  return {
-    theme:document.getElementById('f_theme').value.trim(),
-    target:document.getElementById('f_target').value.trim(),
-    usage:document.getElementById('f_usage').value,
-    price:document.getElementById('f_price').value,
-    level:document.getElementById('f_level').value,
-    direction:getChecked('cg-dir'),
-    vibe:getChecked('cg-vibe'),
-    media:getChecked('cg-media'),
-    detail:document.getElementById('f_detail').value.trim(),
-    features:document.getElementById('f_features').value.trim(),
-    knowledge:document.getElementById('f_knowledge').value.trim(),
-    research:document.getElementById('f_research').value.trim()
-  };
-}
-function buildCtx(f){
-  const um={both:'自分用・販売用の両方',self:'自分用のみ',sell:'販売用のみ'};
-  const pm={low:'低単価（〜3,000円）',mid:'中価格（3,000〜15,000円）',high:'高価格帯（15,000円〜）'};
-  const lm={beginner:'初心者向け',middle:'中級者向け',expert:'上級者・専門家向け'};
-  return `【GPTsテーマ】${f.theme}
-【想定ターゲット】${f.target}
-【用途】${um[f.usage]}
-【価格帯】${pm[f.price]}
-【対象レベル】${lm[f.level]}
-【重視する方向性】${f.direction}
-【世界観・ブランド感】${f.vibe}
-【販売媒体】${f.media}
-【補足・こだわり】${f.detail||'なし'}
-【追加機能】${f.features||'なし'}
-【知識ファイル要素】${f.knowledge||'なし'}
-【リサーチ情報】${f.research||'なし'}`.trim();
-}
-
-function clearOutput(){
-  OUTPUT_TABS.forEach(id=>document.getElementById(id).innerHTML='');
-  document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('on'));
-  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('on'));
-  document.getElementById('t-analysis').classList.add('on');
-  document.querySelector('.tab-btn').classList.add('on');
-  blockId = 0;
-  blockRegistry = {};
-}
-function createBlock(title, tabId, numLabel, content, options={}){
-  blockId++;
-  const cid = `c${blockId}`;
-  blockRegistry[cid] = {
-    title: title || '',
-    content: content || '',
-    kind: options.kind || 'generic',
-    fileName: options.fileName || sanitizeFileName(title || 'document'),
-    exportable: !!options.exportable
-  };
-  const div = document.createElement('div');
-  div.className='ob';
-  const buttons = [
-    `<button class="btn-copy" onclick="copyBlock('${cid}', this)">📋 コピー</button>`
-  ];
-  if(options.exportable){
-    buttons.push(`<button class="btn-doc" onclick="openBlockHtml('${cid}')">HTML書き出し</button>`);
-    buttons.push(`<button class="btn-doc" onclick="printBlockPdf('${cid}')">印刷 / PDF</button>`);
-  }
-  div.innerHTML = `
-    <div class="ob-head">
-      <div class="ob-head-left">
-        <span class="ob-num">${escHtml(String(numLabel || blockId))}</span>
-        <span class="ob-title">${escHtml(title || '')}</span>
-      </div>
-      <div class="ob-right">${buttons.join('')}</div>
-    </div>
-    <div class="ob-body">
-      <div class="ob-content">${escHtml(content || '')}</div>
-    </div>
-  `;
-  document.getElementById(tabId).appendChild(div);
-}
-function copyBlock(cid, btn){
-  const content = blockRegistry[cid]?.content || '';
-  navigator.clipboard.writeText(content).then(()=>{
-    btn.textContent='✓ コピー済み';
-    btn.classList.add('ok');
-    setTimeout(()=>{btn.textContent='📋 コピー';btn.classList.remove('ok')},1800);
-  });
-}
-function sanitizeFileName(name){
-  return String(name || 'document')
-    .replace(/[\\/:*?"<>|]/g,' ')
-    .replace(/\s+/g,' ')
-    .trim()
-    .slice(0,80) || 'document';
-}
 function textToHtmlBody(text){
   const safe = escHtml(text || '');
   const blocks = safe.split(/\n{2,}/).map(part=>`<p>${part.replace(/\n/g,'<br>')}</p>`).join('');
   return blocks;
 }
+
 function buildDocumentHtml(title, content, kind){
   const instructions = kind === 'knowledge'
     ? 'このHTMLは知識ファイルの整形版です。Safariで開いた後、共有→プリント→拡大でPDF保存できます。'
@@ -1128,6 +1249,7 @@ p{margin:0 0 16px}
 </body>
 </html>`;
 }
+
 function openBlockHtml(cid){
   const item = blockRegistry[cid];
   if(!item) return;
@@ -1145,6 +1267,7 @@ function openBlockHtml(cid){
   }
   setTimeout(()=>URL.revokeObjectURL(url), 30000);
 }
+
 function printBlockPdf(cid){
   const item = blockRegistry[cid];
   if(!item) return;
@@ -1163,20 +1286,68 @@ function printBlockPdf(cid){
   };
 }
 
-let progTimer=null, stepI=0;
-function startProg(){
-  stepI=0;
-  document.getElementById('progress-fill').style.width='0%';
-  document.getElementById('loader-step').textContent=STEPS[0];
-  progTimer=setInterval(()=>{
-    stepI=Math.min(stepI+1, STEPS.length-1);
-    document.getElementById('loader-step').textContent=STEPS[stepI];
-    document.getElementById('progress-fill').style.width=Math.min(92, ((stepI+1)/STEPS.length)*100)+'%';
-  }, 1200);
+function clearOutput(){
+  OUTPUT_TABS.forEach(id=>document.getElementById(id).innerHTML='');
+  document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('on'));
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('on'));
+  document.getElementById('t-analysis').classList.add('on');
+  document.querySelector('.tab-btn').classList.add('on');
+  blockId = 0;
+  blockRegistry = {};
 }
-function endProg(){
-  clearInterval(progTimer);
-  document.getElementById('progress-fill').style.width='100%';
+
+function createBlock(title, tabId, numLabel, content, options={}){
+  blockId++;
+  const cid = `c${blockId}`;
+  blockRegistry[cid] = {
+    title: title || '',
+    content: content || '',
+    kind: options.kind || 'generic',
+    fileName: options.fileName || sanitizeFileName(title || 'document'),
+    exportable: !!options.exportable
+  };
+  const div = document.createElement('div');
+  div.className='ob';
+  const buttons = [
+    `<button class="btn-copy" onclick="copyBlock('${cid}', this)">📋 コピー</button>`
+  ];
+  if(options.exportable){
+    buttons.push(`<button class="btn-doc" onclick="openBlockHtml('${cid}')">HTML書き出し</button>`);
+    buttons.push(`<button class="btn-doc" onclick="printBlockPdf('${cid}')">印刷 / PDF</button>`);
+  }
+  div.innerHTML = `
+    <div class="ob-head">
+      <div class="ob-head-left">
+        <span class="ob-num">${escHtml(String(numLabel || blockId))}</span>
+        <span class="ob-title">${escHtml(title || '')}</span>
+      </div>
+      <div class="ob-right">${buttons.join('')}</div>
+    </div>
+    <div class="ob-body">
+      <div class="ob-content">${escHtml(content || '')}</div>
+    </div>
+  `;
+  document.getElementById(tabId).appendChild(div);
+}
+
+async function copyBlock(cid, btn){
+  const content = blockRegistry[cid]?.content || '';
+  try{
+    await navigator.clipboard.writeText(content);
+  }catch{
+    const ta = document.createElement('textarea');
+    ta.value = content;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+  }
+  btn.textContent='✓ コピー済み';
+  btn.classList.add('ok');
+  setTimeout(()=>{btn.textContent='📋 コピー';btn.classList.remove('ok');},1800);
 }
 
 function switchTab(id, btn){
@@ -1185,72 +1356,206 @@ function switchTab(id, btn){
   document.getElementById(id).classList.add('on');
   btn.classList.add('on');
 }
+
 function showErr(msg){
   const el=document.getElementById('err-box');
   el.textContent='⚠️ ' + msg;
   el.classList.add('on');
 }
-function hideErr(){document.getElementById('err-box').classList.remove('on')}
+
+function hideErr(){
+  document.getElementById('err-box').classList.remove('on');
+}
+
+function setLoaderState(percent, text){
+  document.getElementById('progress-fill').style.width = `${Math.max(0, Math.min(100, percent))}%`;
+  if(text) document.getElementById('loader-step').textContent = text;
+}
+
+function startProg(){
+  clearInterval(progTimer);
+  setLoaderState(4, '初期化中');
+  let pulse = 4;
+  progTimer = setInterval(()=>{
+    pulse = Math.min(95, pulse + 0.4);
+    const current = parseFloat(document.getElementById('progress-fill').style.width) || 0;
+    if(current < pulse){
+      document.getElementById('progress-fill').style.width = `${pulse.toFixed(1)}%`;
+    }
+  }, 800);
+}
+
+function endProg(text='完成しました'){
+  clearInterval(progTimer);
+  setLoaderState(100, text);
+}
 
 function mapGeminiError(status, message){
   const msg = String(message || '').toLowerCase();
-  if(status===400 && msg.includes('api key not valid')) return 'Gemini APIキーが無効です。Google AI Studioで新しいキーを発行して入れ直してください。';
-  if(status===400 && (msg.includes('quota') || msg.includes('resource exhausted'))) return 'Geminiの無料枠または利用上限に達しています。少し待つか、Google AI Studio側の利用状況を確認してください。';
-  if(status===403) return 'アクセスが拒否されました。Gemini APIが有効なプロジェクトで発行したキーか確認してください。';
-  if(status===429) return 'リクエスト上限に達しました。少し待ってから再実行してください。';
-  if(status===500 || status===503) return 'Gemini側が一時的に不安定です。少し時間を置いて再実行してください。';
+  if(status === 400 && (msg.includes('api key not valid') || msg.includes('api_key_invalid'))) return 'Gemini APIキーが無効です。Google AI Studioで新しいキーを発行して入れ直してください。';
+  if(status === 400 && (msg.includes('quota') || msg.includes('resource exhausted'))) return 'Geminiの利用上限に達しています。少し待つか、Google AI Studio側の利用状況を確認してください。';
+  if(status === 400 && msg.includes('response_schema')) return '出力形式の指定が重すぎるか不正です。スキーマ設定を見直してください。';
+  if(status === 403) return 'アクセスが拒否されました。Gemini APIが有効なプロジェクトで発行したキーか確認してください。';
+  if(status === 413) return '入力または出力要求が大きすぎます。補足情報を少し減らして再実行してください。';
+  if(status === 429) return 'リクエスト上限に達しました。少し待ってから再実行してください。';
+  if(status === 500 || status === 502 || status === 503 || status === 504) return 'Gemini側または生成処理が一時的に不安定です。少し時間を置いて再実行してください。';
   return message || `HTTP ${status}`;
 }
 
-function buildRequestPayload(ctx){
-  const prompt = `あなたは「超高単価でも通用するGPTs設計」を担当する主席AIシステムアーキテクト兼デジタル商品戦略家です。
-以下の入力を読み取り、必ずJSONだけを返してください。前置き・補足・コードフェンスは禁止です。
+function shouldRetryByMessage(message){
+  const msg = String(message || '').toLowerCase();
+  return RETRYABLE_TEXTS.some(token => msg.includes(token.toLowerCase()));
+}
+
+function sanitizeJsonText(text){
+  return String(text || '')
+    .replace(/^\uFEFF/, '')
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+}
+
+function extractLikelyJson(text){
+  const cleaned = sanitizeJsonText(text);
+  if(!cleaned) return '';
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if(firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace){
+    return cleaned.slice(firstBrace, lastBrace + 1);
+  }
+  return cleaned;
+}
+
+function parseGeminiJsonEnvelope(text){
+  let raw;
+  try{
+    raw = JSON.parse(text);
+  }catch{
+    throw new Error('Geminiの応答全体を解析できませんでした。再度実行してください。');
+  }
+  const candidate = raw?.candidates?.[0];
+  const finishReason = String(candidate?.finishReason || '').toUpperCase();
+  const joined = (raw.candidates || [])
+    .flatMap(c => (c.content?.parts || []))
+    .map(p => p.text || '')
+    .join('')
+    .trim();
+  if(!joined) throw new Error('Geminiから有効な出力が返りませんでした。');
+  if(finishReason && finishReason !== 'STOP'){
+    if(finishReason === 'MAX_TOKENS') throw new Error('Geminiの出力が途中で切れました。再実行してください。');
+    if(finishReason === 'SAFETY') throw new Error('Geminiの安全フィルタにより出力が止まりました。入力内容を少し調整してください。');
+  }
+  const jsonText = extractLikelyJson(joined);
+  try{
+    return JSON.parse(jsonText);
+  }catch{
+    throw new Error('GeminiのJSON出力が壊れています。もう一度実行してください。');
+  }
+}
+
+function buildPhasePayload(ctx, phase){
+  const baseRules = `あなたは「高単価でも通用するGPTs設計」を担当する主席AIシステムアーキテクト兼デジタル商品戦略家です。
+以下の入力情報に完全特化し、必ずJSONだけを返してください。前置き・補足・コードフェンスは禁止です。
 
 ${ctx}
 
-厳守ルール:
+共通ルール:
 - すべて日本語
-- 抽象論・一般論は禁止。入力情報に完全特化
-- 「それっぽい説明」ではなく、そのまま販売・実装・運用で使える完成度
-- 文章は自然で人間的。AI感の強い定型文は禁止
-- 高単価商品として見せても弱くならない濃さで書く
-- promptBlocks[0] は GPTs作成画面にそのまま貼りやすい「コピペ専用の作成項目一覧」
-- promptBlocks[1] は ガチガチの高性能システムプロンプト。本番運用レベルで、役割・目的・入力整理・必須ワークフロー・知識ファイル利用規則・出力ルール・品質チェック・不足情報時の動き・禁止事項・セルフレビューまで含める
-- promptBlocks[2] は 初回ヒアリング設計 + 会話スターター + 出力精度を上げる質問テンプレ
-- knowledgeFiles は そのまま知識ファイルとして読み込ませやすい本文。説明ではなく「ファイル本文」
-- manualFiles は 2本以上。1本は購入者向け活用マニュアル、もう1本は販売者向け高単価化マニュアル
-- names は3案、iconsは3案、knowledgeFilesは3本、manualFilesは2本以上
-- copyAngles と titleIdeas は5件以上
-- productDescription は販売ページに貼れる密度
-- benefits / trustPhrases は弱くしない
+- 抽象論・一般論は禁止
+- 販売・実装・運用ですぐ使える完成度
+- 自然な日本語。AI臭い定型文は禁止
+- 高単価商品として見せても弱くならない濃さで書く`;
 
-各フィールドの目安:
-- analysis: 詳細分析
-- promptBlocks[1].content: 最重要。濃く長く具体的に
-- knowledgeFiles[*].content: そのままファイル化できる密度
-- manualFiles[*].content: 商品として価値が出る密度
+  if(phase === 'core'){
+    return {
+      contents:[{parts:[{text:`${baseRules}
 
-JSON以外は返さないでください。`;
+今回は「分析・名前・アイコン・プロンプト・マネタイズ設計」だけを出力してください。
+厳守:
+- docTitle は設計書タイトル
+- analysis は入力情報を踏まえた詳細分析
+- names は3案
+- icons は3案。各案にコンセプト説明、Gemini向け日本語画像プロンプト、英語画像プロンプトを含める
+- promptBlocks は3本
+  1) GPTs作成画面に貼りやすいコピペ専用の作成項目一覧
+  2) 本番運用レベルの高性能システムプロンプト
+  3) 初回ヒアリング設計 + 会話スターター + 質問テンプレ
+- monetize はこのテーマに特化した販売・単価設計・差別化の要点
+
+JSON以外は返さないでください。`}]}],
+      generationConfig:{
+        temperature:0.65,
+        topP:0.9,
+        maxOutputTokens:7000,
+        responseMimeType:'application/json',
+        responseSchema:{
+          type:'OBJECT',
+          required:['docTitle','analysis','names','icons','promptBlocks','monetize'],
+          properties:{
+            docTitle:{type:'STRING'},
+            analysis:{type:'STRING'},
+            names:{type:'ARRAY',items:{type:'OBJECT',required:['title','content'],properties:{title:{type:'STRING'},content:{type:'STRING'}}}},
+            icons:{type:'ARRAY',items:{type:'OBJECT',required:['title','content','iconJapanesePrompt','iconEnglishPrompt'],properties:{title:{type:'STRING'},content:{type:'STRING'},iconJapanesePrompt:{type:'STRING'},iconEnglishPrompt:{type:'STRING'}}}},
+            promptBlocks:{type:'ARRAY',items:{type:'OBJECT',required:['title','content'],properties:{title:{type:'STRING'},content:{type:'STRING'}}}},
+            monetize:{type:'STRING'}
+          }
+        }
+      }
+    };
+  }
+
+  if(phase === 'assets'){
+    return {
+      contents:[{parts:[{text:`${baseRules}
+
+今回は「知識ファイル・マニュアル」だけを出力してください。
+厳守:
+- knowledgeFiles は3本
+- manualFiles は2本以上
+- knowledgeFiles[*].content はそのまま知識ファイルにできる本文
+- manualFiles[*].content は商品として価値が出る密度
+- 1本は購入者向け活用マニュアル、1本は販売者向け高単価化マニュアル
+- fileName は日本語でも英数字でもよいが保存しやすい名称
+
+JSON以外は返さないでください。`}]}],
+      generationConfig:{
+        temperature:0.62,
+        topP:0.9,
+        maxOutputTokens:7800,
+        responseMimeType:'application/json',
+        responseSchema:{
+          type:'OBJECT',
+          required:['knowledgeFiles','manualFiles'],
+          properties:{
+            knowledgeFiles:{type:'ARRAY',items:{type:'OBJECT',required:['title','fileName','content'],properties:{title:{type:'STRING'},fileName:{type:'STRING'},content:{type:'STRING'}}}},
+            manualFiles:{type:'ARRAY',items:{type:'OBJECT',required:['title','fileName','content'],properties:{title:{type:'STRING'},fileName:{type:'STRING'},content:{type:'STRING'}}}}
+          }
+        }
+      }
+    };
+  }
 
   return {
-    contents:[{parts:[{text: prompt}]}],
+    contents:[{parts:[{text:`${baseRules}
+
+今回は「販売文・訴求軸」だけを出力してください。
+厳守:
+- copyAngles と titleIdeas は各5件以上
+- productDescription は販売ページに貼れる密度
+- benefits / trustPhrases は弱くしない
+- fitFor / notFitFor / ctaSoft / ctaStrong も具体的に
+
+JSON以外は返さないでください。`}]}],
     generationConfig:{
-      temperature:0.75,
-      topP:0.95,
-      maxOutputTokens:12288,
+      temperature:0.7,
+      topP:0.9,
+      maxOutputTokens:4200,
       responseMimeType:'application/json',
       responseSchema:{
         type:'OBJECT',
-        required:['docTitle','analysis','names','icons','promptBlocks','knowledgeFiles','manualFiles','monetize','copyAngles','titleIdeas','productDescription','benefits','fitFor','notFitFor','ctaSoft','ctaStrong','trustPhrases'],
+        required:['copyAngles','titleIdeas','productDescription','benefits','fitFor','notFitFor','ctaSoft','ctaStrong','trustPhrases'],
         properties:{
-          docTitle:{type:'STRING'},
-          analysis:{type:'STRING'},
-          names:{type:'ARRAY',items:{type:'OBJECT',required:['title','content'],properties:{title:{type:'STRING'},content:{type:'STRING'}}}},
-          icons:{type:'ARRAY',items:{type:'OBJECT',required:['title','content','iconJapanesePrompt','iconEnglishPrompt'],properties:{title:{type:'STRING'},content:{type:'STRING'},iconJapanesePrompt:{type:'STRING'},iconEnglishPrompt:{type:'STRING'}}}},
-          promptBlocks:{type:'ARRAY',items:{type:'OBJECT',required:['title','content'],properties:{title:{type:'STRING'},content:{type:'STRING'}}}},
-          knowledgeFiles:{type:'ARRAY',items:{type:'OBJECT',required:['title','fileName','content'],properties:{title:{type:'STRING'},fileName:{type:'STRING'},content:{type:'STRING'}}}},
-          manualFiles:{type:'ARRAY',items:{type:'OBJECT',required:['title','fileName','content'],properties:{title:{type:'STRING'},fileName:{type:'STRING'},content:{type:'STRING'}}}},
-          monetize:{type:'STRING'},
           copyAngles:{type:'ARRAY',items:{type:'STRING'}},
           titleIdeas:{type:'ARRAY',items:{type:'STRING'}},
           productDescription:{type:'STRING'},
@@ -1266,33 +1571,101 @@ JSON以外は返さないでください。`;
   };
 }
 
-async function callGemini(apiKey, ctx){
-  let resp;
-  try{
-    resp = await fetch(GENERATE_ENDPOINT(apiKey), {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(buildRequestPayload(ctx))
-    });
-  }catch(err){
-    throw new Error('Gemini APIへの通信に失敗しました。Wi-Fi/モバイル回線、APIキー、ブラウザの再読み込みを確認してください。');
-  }
-  const text = await resp.text();
-  if(!resp.ok){
-    let message=text;
+async function callGeminiJson(apiKey, payload, label=''){ 
+  let lastError = null;
+  for(let attempt = 0; attempt <= MAX_RETRIES; attempt++){
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try{
-      const parsed=JSON.parse(text);
-      message=parsed.error?.message || text;
-    }catch{}
-    throw new Error(mapGeminiError(resp.status, message));
+      const resp = await fetch(GENERATE_ENDPOINT(apiKey), {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+      const text = await resp.text();
+
+      if(!resp.ok){
+        let message = text;
+        try{
+          const parsed = JSON.parse(text);
+          message = parsed?.error?.message || text;
+        }catch{}
+        const mapped = mapGeminiError(resp.status, message);
+        if(RETRYABLE_STATUS.has(resp.status) && attempt < MAX_RETRIES){
+          console.warn(`Gemini retry [${label}]`, resp.status, message);
+          await sleep(backoffMs(attempt));
+          continue;
+        }
+        throw new Error(mapped);
+      }
+
+      try{
+        return parseGeminiJsonEnvelope(text);
+      }catch(parseErr){
+        if(attempt < MAX_RETRIES && shouldRetryByMessage(parseErr.message)){
+          console.warn(`Gemini parse retry [${label}]`, parseErr.message);
+          await sleep(backoffMs(attempt));
+          continue;
+        }
+        throw parseErr;
+      }
+    }catch(err){
+      if(err?.name === 'AbortError'){
+        lastError = new Error('Geminiの応答がタイムアウトしました。入力を少し減らすか、少し時間を置いて再実行してください。');
+      }else if(err instanceof Error){
+        lastError = err;
+      }else{
+        lastError = new Error('Gemini APIへの通信に失敗しました。Wi-Fi/モバイル回線、APIキー、ブラウザの再読み込みを確認してください。');
+      }
+      if(attempt < MAX_RETRIES && shouldRetryByMessage(lastError.message)){
+        await sleep(backoffMs(attempt));
+        continue;
+      }
+      throw lastError;
+    }finally{
+      clearTimeout(timer);
+    }
   }
-  let raw;
-  try{raw=JSON.parse(text)}catch{throw new Error('Geminiの応答を解析できませんでした。再度実行してください。')}
-  const jsonText=(raw.candidates || []).flatMap(c => (c.content?.parts || [])).map(p => p.text || '').join('');
-  if(!jsonText) throw new Error('Geminiから有効な出力が返りませんでした。');
-  try{return JSON.parse(jsonText)}catch{
-    throw new Error('GeminiのJSON出力が壊れています。もう一度実行してください。');
-  }
+  throw lastError || new Error('生成に失敗しました。');
+}
+
+function normalizeArray(value){
+  return Array.isArray(value) ? value : [];
+}
+
+function normalizeString(value){
+  return typeof value === 'string' ? value : '';
+}
+
+function normalizeObjectArray(arr, requiredKeys){
+  return normalizeArray(arr).map(item => {
+    const base = {};
+    for(const key of requiredKeys) base[key] = normalizeString(item?.[key]);
+    return base;
+  }).filter(item => Object.values(item).some(Boolean));
+}
+
+function normalizeMergedData(data){
+  return {
+    docTitle: normalizeString(data?.docTitle),
+    analysis: normalizeString(data?.analysis),
+    names: normalizeObjectArray(data?.names, ['title','content']),
+    icons: normalizeObjectArray(data?.icons, ['title','content','iconJapanesePrompt','iconEnglishPrompt']),
+    promptBlocks: normalizeObjectArray(data?.promptBlocks, ['title','content']),
+    knowledgeFiles: normalizeObjectArray(data?.knowledgeFiles, ['title','fileName','content']).map(item => ({...item, fileName: sanitizeFileName(item.fileName || item.title)})),
+    manualFiles: normalizeObjectArray(data?.manualFiles, ['title','fileName','content']).map(item => ({...item, fileName: sanitizeFileName(item.fileName || item.title)})),
+    monetize: normalizeString(data?.monetize),
+    copyAngles: normalizeArray(data?.copyAngles).map(x => normalizeString(x)).filter(Boolean),
+    titleIdeas: normalizeArray(data?.titleIdeas).map(x => normalizeString(x)).filter(Boolean),
+    productDescription: normalizeString(data?.productDescription),
+    benefits: normalizeArray(data?.benefits).map(x => normalizeString(x)).filter(Boolean),
+    fitFor: normalizeString(data?.fitFor),
+    notFitFor: normalizeString(data?.notFitFor),
+    ctaSoft: normalizeString(data?.ctaSoft),
+    ctaStrong: normalizeString(data?.ctaStrong),
+    trustPhrases: normalizeArray(data?.trustPhrases).map(x => normalizeString(x)).filter(Boolean)
+  };
 }
 
 function renderAllTabs(data){
@@ -1303,13 +1676,7 @@ function renderAllTabs(data){
   });
 
   (Array.isArray(data.icons) ? data.icons : []).forEach((item,i)=>{
-    const content = `${item.content || ''}
-
-◆ Gemini向け画像プロンプト
-${item.iconJapanesePrompt || ''}
-
-◆ 英語プロンプト
-${item.iconEnglishPrompt || ''}`;
+    const content = `${item.content || ''}\n\n◆ Gemini向け画像プロンプト\n${item.iconJapanesePrompt || ''}\n\n◆ 英語プロンプト\n${item.iconEnglishPrompt || ''}`;
     createBlock(item.title || `アイコン案 ${i+1}`, 't-icon', String.fromCharCode(65+i), content);
   });
 
@@ -1367,12 +1734,83 @@ ${item.iconEnglishPrompt || ''}`;
   createBlock('販売文一式', 't-copy', '✦', copyText);
 }
 
+function collectForm(){
+  return {
+    theme:document.getElementById('f_theme').value.trim(),
+    target:document.getElementById('f_target').value.trim(),
+    usage:document.getElementById('f_usage').value,
+    price:document.getElementById('f_price').value,
+    level:document.getElementById('f_level').value,
+    direction:getChecked('cg-dir'),
+    vibe:getChecked('cg-vibe'),
+    media:getChecked('cg-media'),
+    detail:document.getElementById('f_detail').value.trim(),
+    features:document.getElementById('f_features').value.trim(),
+    knowledge:document.getElementById('f_knowledge').value.trim(),
+    research:document.getElementById('f_research').value.trim()
+  };
+}
+
+function buildCtx(f){
+  const um={both:'自分用・販売用の両方',self:'自分用のみ',sell:'販売用のみ'};
+  const pm={low:'低単価（〜3,000円）',mid:'中価格（3,000〜15,000円）',high:'高価格帯（15,000円〜）'};
+  const lm={beginner:'初心者向け',middle:'中級者向け',expert:'上級者・専門家向け'};
+  return `【GPTsテーマ】${f.theme}
+【想定ターゲット】${f.target}
+【用途】${um[f.usage]}
+【価格帯】${pm[f.price]}
+【対象レベル】${lm[f.level]}
+【重視する方向性】${f.direction}
+【世界観・ブランド感】${f.vibe}
+【販売媒体】${f.media}
+【補足・こだわり】${f.detail||'なし'}
+【追加機能】${f.features||'なし'}
+【知識ファイル要素】${f.knowledge||'なし'}
+【リサーチ情報】${f.research||'なし'}`.trim();
+}
+
+function buildHistoryEntry(theme, form, data){
+  return {
+    id: `${currentPw}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+    pw: currentPw,
+    theme,
+    date: new Date().toLocaleString('ja-JP'),
+    sections:
+      1 +
+      (data.names?.length || 0) +
+      (data.icons?.length || 0) +
+      (data.promptBlocks?.length || 0) +
+      (data.knowledgeFiles?.length || 0) +
+      (data.manualFiles?.length || 0) +
+      2,
+    form,
+    data,
+    createdAt: Date.now()
+  };
+}
+
+function loadSample(){
+  setValue('f_theme','ココナラ×AIマネタイズ支援GPTs');
+  setValue('f_target','副業初心者・ゼロイチ挑戦中の会社員（20〜40代）');
+  setValue('f_usage','both');
+  setValue('f_price','high');
+  setValue('f_level','beginner');
+  setValue('f_detail','ユーザーがジャンルを入力するだけで、ココナラの出品タイトル・説明文・価格設定・ポートフォリオ案まで自動で提案。高単価商品化まで見据えたい。');
+  setValue('f_features','最初にユーザーへ5問ヒアリング。出力はコピペで使える形式。知識ファイルと販売マニュアルはそのまま商品化しやすい密度で。');
+  setValue('f_knowledge','ココナラ人気カテゴリー一覧、売れる出品文の型、プロフィール書き方ガイド、自分の実績・強みの整理');
+  setValue('f_research','noteで「ココナラ 副業」検索では月収10万円系が多い。Brain上の「GPTs販売」商品は3〜5千円が主流。「ゼロから副業」「AI活用」「完全初心者OK」がキーワードとして刺さっている。ターゲットの悩み：何から始めるか分からない、文章が書けない、値段設定が分からない。');
+  setChips('cg-dir',['収益化','実用性','高性能','差別化']);
+  setChips('cg-vibe',['高級感','権威性','プロフェッショナル']);
+  setChips('cg-media',['ココナラ','note','Brain','Threads・X']);
+}
+
 async function generate(){
   const apiKey=document.getElementById('apiKey').value.trim();
-  if(!apiKey){showErr('Gemini APIキーを入力してください。');return}
-  if(!apiKey.startsWith('AIza')){showErr('Gemini APIキーの形式が不正です。Google AI Studioで発行した AIza... から始まるキーを入力してください。');return}
+  if(!apiKey){showErr('Gemini APIキーを入力してください。');return;}
+  if(!apiKey.startsWith('AIza')){showErr('Gemini APIキーの形式が不正です。Google AI Studioで発行した AIza... から始まるキーを入力してください。');return;}
   const f=collectForm();
-  if(!f.theme){showErr('GPTsのテーマを入力してください。');return}
+  if(!f.theme){showErr('GPTsのテーマを入力してください。');return;}
+  if(!f.target){showErr('想定ターゲットを入力してください。');return;}
 
   hideErr();
   clearOutput();
@@ -1382,41 +1820,39 @@ async function generate(){
   startProg();
 
   try{
-    const data = await callGemini(apiKey, buildCtx(f));
+    const ctx = buildCtx(f);
+
+    setLoaderState(12, '分析・ブランド設計を生成中');
+    const core = await callGeminiJson(apiKey, buildPhasePayload(ctx, 'core'), 'core');
+
+    setLoaderState(46, '知識ファイルとマニュアルを生成中');
+    const assets = await callGeminiJson(apiKey, buildPhasePayload(ctx, 'assets'), 'assets');
+
+    setLoaderState(78, '販売文と訴求軸を生成中');
+    const sales = await callGeminiJson(apiKey, buildPhasePayload(ctx, 'sales'), 'sales');
+
+    setLoaderState(92, '最終整形中');
+    const data = normalizeMergedData({ ...core, ...assets, ...sales });
+
     renderAllTabs(data);
     document.getElementById('output-title').textContent = data.docTitle || `${f.theme} — 設計書`;
     document.getElementById('output-area').classList.add('on');
     document.getElementById('output-area').scrollIntoView({behavior:'smooth',block:'start'});
-    const sections =
-      1 +
-      (data.names?.length || 0) +
-      (data.icons?.length || 0) +
-      (data.promptBlocks?.length || 0) +
-      (data.knowledgeFiles?.length || 0) +
-      (data.manualFiles?.length || 0) +
-      2;
-    addHistory({theme:f.theme,date:new Date().toLocaleString('ja-JP'),sections,form:f,data});
+
+    await addHistory(buildHistoryEntry(f.theme, f, data));
   }catch(err){
-    showErr(err.message || '生成中にエラーが発生しました。');
+    showErr(err?.message || '生成中にエラーが発生しました。');
   }finally{
     endProg();
-    document.getElementById('loading').classList.remove('on');
+    setTimeout(()=>{document.getElementById('loading').classList.remove('on');}, 300);
     document.getElementById('gen-btn').disabled = false;
   }
-}
-
-function escHtml(s){
-  return String(s || '')
-    .replace(/&/g,'&amp;')
-    .replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;')
-    .replace(/'/g,'&#39;');
 }
 
 window.addEventListener('scroll',()=>{
   document.getElementById('scroll-top').classList.toggle('show', window.scrollY > 400);
 });
+
 window.addEventListener('load',()=>{
   pinMaster.focus();
   renderPinSlots();
