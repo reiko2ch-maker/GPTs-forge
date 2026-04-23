@@ -556,8 +556,8 @@ select option{background:#1b2138}
       <div class="api-row">
         <div class="api-label">🔑 GEMINI API</div>
         <div class="api-input-wrap">
-          <input class="api-input" type="text" id="apiKey" placeholder="空欄可（Worker秘密鍵を使う場合） / AIza..." autocomplete="off" spellcheck="false">
-          <div class="api-note">Cloudflare Worker側に <strong>GEMINI_API_KEY</strong> を設定している場合は空欄でも動作します。直接入力する場合は Google AI Studioで発行した Gemini APIキーを使ってください。</div>
+          <input class="api-input" type="text" id="apiKey" placeholder="AIza..." autocomplete="off" spellcheck="false">
+          <div class="api-note">Google AI Studioで発行したGemini APIキーを入力してください。GitHub Pages直結版です。軽量な Gemini 2.5 Flash-Lite を優先し、使えない場合は Gemini 2.5 Flash に自動切替します。</div>
         </div>
         <button class="btn-sec" onclick="loadSample()">📋 サンプル入力</button>
       </div>
@@ -726,7 +726,6 @@ select option{background:#1b2138}
 <button class="scroll-top" id="scroll-top" onclick="window.scrollTo({top:0,behavior:'smooth'})">↑</button>
 
 <script>
-
 'use strict';
 
 let currentPw = null;
@@ -742,28 +741,30 @@ const MAX_HISTORY = 6;
 const CHECKPOINT_KEY = pw => `gpts_forge_checkpoint_${pw}`;
 const CHECKPOINT_TTL_MS = 1000 * 60 * 60 * 12;
 const PHASE_PLAN = [
-  {id:'overview', label:'分析と設計書タイトルを生成中', progress:10},
-  {id:'names', label:'GPTs名の候補を生成中', progress:18},
-  {id:'icons', label:'アイコン案を生成中', progress:28},
-  {id:'prompt_create', label:'作成項目プロンプトを生成中', progress:38},
-  {id:'prompt_system', label:'本番用システムプロンプトを生成中', progress:48},
-  {id:'prompt_chat', label:'初回ヒアリング設計を生成中', progress:56},
-  {id:'knowledge_core', label:'主要な知識ファイルを生成中', progress:66},
-  {id:'knowledge_bonus', label:'追加の知識ファイルを生成中', progress:72},
-  {id:'manual_user', label:'購入者向けマニュアルを生成中', progress:80},
-  {id:'manual_seller', label:'販売者向けマニュアルを生成中', progress:88},
-  {id:'sales', label:'販売設計と販売文を生成中', progress:94}
+  {id:'overview', label:'分析と設計書タイトルを生成中', progress:8},
+  {id:'names', label:'GPTs名の候補を生成中', progress:16},
+  {id:'icons', label:'アイコン案を生成中', progress:24},
+  {id:'prompt_setup', label:'作成項目一覧を生成中', progress:34},
+  {id:'prompt_system', label:'高性能システムプロンプトを生成中', progress:46},
+  {id:'prompt_starter', label:'ヒアリング設計を生成中', progress:56},
+  {id:'knowledge_1', label:'知識ファイル 1/3 を生成中', progress:64},
+  {id:'knowledge_2', label:'知識ファイル 2/3 を生成中', progress:70},
+  {id:'knowledge_3', label:'知識ファイル 3/3 を生成中', progress:76},
+  {id:'manual_1', label:'活用マニュアルを生成中', progress:84},
+  {id:'manual_2', label:'販売者向けマニュアルを生成中', progress:90},
+  {id:'sales', label:'販売設計と販売文を生成中', progress:96}
 ];
 const HISTORY_DB_NAME = 'gpts_forge_histories_db';
 const HISTORY_DB_VERSION = 1;
 const HISTORY_STORE = 'histories';
 const STORAGE_KEY = pw => `gpts_forge_hist_${pw}`;
-const REQUEST_TIMEOUT_MS = 90000;
-const MAX_RETRIES = 2;
-const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
-const RETRYABLE_TEXTS = ['timeout','timed out','temporarily unavailable','unavailable','overloaded','resource exhausted','try again','再実行','タイムアウト','不安定','有効な出力が返りませんでした','JSON出力が壊れています','phase'];
-const BACKEND_ENDPOINT = '/api/forge';
-const APP_VERSION = 'cf-worker-v1';
+const REQUEST_TIMEOUT_MS = 65000;
+const MAX_RETRIES = 4;
+const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+const RETRYABLE_TEXTS = ['timeout','timed out','temporarily unavailable','unavailable','overloaded','resource exhausted','try again','再実行','タイムアウト','不安定','有効な出力が返りませんでした','JSON出力が壊れています','途中で切れました'];
+const MODEL_CANDIDATES = ['gemini-2.5-flash-lite', 'gemini-2.5-flash'];
+let activeModel = MODEL_CANDIDATES[0];
+const GENERATE_ENDPOINT = (model, apiKey) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
 (function initStarfield(){
   const canvas = document.getElementById('canvas');
@@ -1482,270 +1483,301 @@ ${ctx}
 - 販売・実装・運用ですぐ使える完成度
 - 自然な日本語。AI臭い定型文は禁止
 - 高単価商品として見せても弱くならない濃さで書く
-- 返答は必ず JSON のみ`;
+- 返答は必ず JSON のみ
+- 1つの依頼で求められていない項目は出さない`;
 
-  if(phase === 'overview'){
-    return {
-      contents:[{parts:[{text:`${baseRules}
-
-今回は「設計書タイトル」と「分析」だけを出力してください。
-厳守:
-- docTitle は販売・配布にも耐える設計書タイトル
-- analysis は市場価値、ターゲット心理、差別化、強み、販売勝ち筋まで含む詳細分析
-- 無駄な前置きは禁止
-
-JSON以外は返さないでください。`}]}],
-      generationConfig:{
-        temperature:0.58,
-        topP:0.88,
-        maxOutputTokens:2400,
-        responseMimeType:'application/json',
-        responseSchema:{
-          type:'OBJECT',
-          required:['docTitle','analysis'],
-          properties:{
-            docTitle:{type:'STRING'},
-            analysis:{type:'STRING'}
-          }
-        }
-      }
-    };
-  }
-
-  if(phase === 'names'){
-    return {
-      contents:[{parts:[{text:`${baseRules}
-
-今回は「GPTs名の候補」だけを出力してください。
-厳守:
-- names は3案
-- 各案とも、名前・コンセプト・売れる理由・向いている世界観まで具体的に
-
-JSON以外は返さないでください。`}]}],
-      generationConfig:{
-        temperature:0.72,
-        topP:0.9,
-        maxOutputTokens:1800,
-        responseMimeType:'application/json',
-        responseSchema:{
-          type:'OBJECT',
-          required:['names'],
-          properties:{
-            names:{type:'ARRAY',items:{type:'OBJECT',required:['title','content'],properties:{title:{type:'STRING'},content:{type:'STRING'}}}}
-          }
-        }
-      }
-    };
-  }
-
-  if(phase === 'icons'){
-    return {
-      contents:[{parts:[{text:`${baseRules}
-
-今回は「アイコン案」だけを出力してください。
-厳守:
-- icons は3案
-- 各案に title, content, iconJapanesePrompt, iconEnglishPrompt を含める
-- content は世界観・色・訴求意図・販売面の強みまで書く
-- 画像プロンプトはそのまま生成に投げやすい精度で書く
-
-JSON以外は返さないでください。`}]}],
-      generationConfig:{
-        temperature:0.68,
-        topP:0.9,
-        maxOutputTokens:2600,
-        responseMimeType:'application/json',
-        responseSchema:{
-          type:'OBJECT',
-          required:['icons'],
-          properties:{
-            icons:{type:'ARRAY',items:{type:'OBJECT',required:['title','content','iconJapanesePrompt','iconEnglishPrompt'],properties:{title:{type:'STRING'},content:{type:'STRING'},iconJapanesePrompt:{type:'STRING'},iconEnglishPrompt:{type:'STRING'}}}}
-          }
-        }
-      }
-    };
-  }
-
-  if(phase === 'prompt'){
-    return {
-      contents:[{parts:[{text:`${baseRules}
-
-今回は「プロンプト群」だけを出力してください。
-厳守:
-- promptBlocks は3本
-- 1本目: GPTs作成画面にそのまま貼りやすいコピペ専用の作成項目一覧
-- 2本目: 本番運用レベルの高性能システムプロンプト
-- 3本目: 初回ヒアリング設計 + 会話スターター + 質問テンプレ
-- 特に2本目は、役割・目的・入力整理・必須ワークフロー・知識ファイル利用規則・出力ルール・品質チェック・不足情報時の動き・禁止事項・セルフレビューまで含める
-
-JSON以外は返さないでください。`}]}],
-      generationConfig:{
-        temperature:0.55,
-        topP:0.86,
-        maxOutputTokens:5200,
-        responseMimeType:'application/json',
-        responseSchema:{
-          type:'OBJECT',
-          required:['promptBlocks'],
-          properties:{
-            promptBlocks:{type:'ARRAY',items:{type:'OBJECT',required:['title','content'],properties:{title:{type:'STRING'},content:{type:'STRING'}}}}
-          }
-        }
-      }
-    };
-  }
-
-  if(phase === 'knowledge'){
-    return {
-      contents:[{parts:[{text:`${baseRules}
-
-今回は「知識ファイル」だけを出力してください。
-厳守:
-- knowledgeFiles は3本
-- knowledgeFiles[*].content はそのまま知識ファイルとして投入できる本文
-- 説明ではなくファイル本文として完成させる
-- title と fileName は保存しやすく分かりやすい名前
-
-JSON以外は返さないでください。`}]}],
-      generationConfig:{
-        temperature:0.56,
-        topP:0.88,
-        maxOutputTokens:5200,
-        responseMimeType:'application/json',
-        responseSchema:{
-          type:'OBJECT',
-          required:['knowledgeFiles'],
-          properties:{
-            knowledgeFiles:{type:'ARRAY',items:{type:'OBJECT',required:['title','fileName','content'],properties:{title:{type:'STRING'},fileName:{type:'STRING'},content:{type:'STRING'}}}}
-          }
-        }
-      }
-    };
-  }
-
-  if(phase === 'manual'){
-    return {
-      contents:[{parts:[{text:`${baseRules}
-
-今回は「活用マニュアル」だけを出力してください。
-厳守:
-- manualFiles は必ず2本
-- 1本は購入者向け活用マニュアル
-- 1本は販売者向け高単価化マニュアル
-- manualFiles[*].content は商品として渡せる密度で、具体的な活用手順まで含める
-
-JSON以外は返さないでください。`}]}],
-      generationConfig:{
-        temperature:0.56,
-        topP:0.88,
-        maxOutputTokens:5200,
-        responseMimeType:'application/json',
-        responseSchema:{
-          type:'OBJECT',
-          required:['manualFiles'],
-          properties:{
-            manualFiles:{type:'ARRAY',items:{type:'OBJECT',required:['title','fileName','content'],properties:{title:{type:'STRING'},fileName:{type:'STRING'},content:{type:'STRING'}}}}
-          }
-        }
-      }
-    };
-  }
-
-  return {
+  const asJson = (prompt, schema, maxOutputTokens, temperature = 0.54, topP = 0.86) => ({
     contents:[{parts:[{text:`${baseRules}
 
-今回は「マネタイズ設計・販売文・訴求軸」だけを出力してください。
-厳守:
-- monetize は単価設計・差別化・導線・販売勝ち筋を具体化
-- copyAngles と titleIdeas は各5件以上
-- productDescription は販売ページにそのまま貼れる密度
-- benefits / trustPhrases は弱くしない
-- fitFor / notFitFor / ctaSoft / ctaStrong も具体的に
+${prompt}
 
 JSON以外は返さないでください。`}]}],
     generationConfig:{
-      temperature:0.64,
-      topP:0.9,
-      maxOutputTokens:3600,
+      temperature,
+      topP,
+      maxOutputTokens,
       responseMimeType:'application/json',
-      responseSchema:{
-        type:'OBJECT',
-        required:['monetize','copyAngles','titleIdeas','productDescription','benefits','fitFor','notFitFor','ctaSoft','ctaStrong','trustPhrases'],
-        properties:{
-          monetize:{type:'STRING'},
-          copyAngles:{type:'ARRAY',items:{type:'STRING'}},
-          titleIdeas:{type:'ARRAY',items:{type:'STRING'}},
-          productDescription:{type:'STRING'},
-          benefits:{type:'ARRAY',items:{type:'STRING'}},
-          fitFor:{type:'STRING'},
-          notFitFor:{type:'STRING'},
-          ctaSoft:{type:'STRING'},
-          ctaStrong:{type:'STRING'},
-          trustPhrases:{type:'ARRAY',items:{type:'STRING'}}
-        }
-      }
+      responseSchema:schema
     }
-  };
+  });
+
+  if(phase === 'overview'){
+    return asJson(
+      `今回は「設計書タイトル」と「分析」だけを出力してください。
+厳守:
+- docTitle は販売・配布にも耐える設計書タイトル
+- analysis は市場価値、ターゲット心理、差別化、勝ち筋、注意点まで含む詳細分析
+- 1200〜2200文字目安で、冗長にしすぎない`,
+      {
+        type:'OBJECT',
+        required:['docTitle','analysis'],
+        properties:{
+          docTitle:{type:'STRING'},
+          analysis:{type:'STRING'}
+        }
+      },
+      2200, 0.5, 0.84
+    );
+  }
+
+  if(phase === 'names'){
+    return asJson(
+      `今回は「GPTs名の候補」だけを出力してください。
+厳守:
+- names は3案
+- 各案とも title, content を含める
+- content はコンセプト、売れる理由、向く世界観をまとめる
+- 1案あたり300〜500文字目安`,
+      {
+        type:'OBJECT',
+        required:['names'],
+        properties:{
+          names:{type:'ARRAY',items:{type:'OBJECT',required:['title','content'],properties:{title:{type:'STRING'},content:{type:'STRING'}}}}
+        }
+      },
+      1800, 0.64, 0.88
+    );
+  }
+
+  if(phase === 'icons'){
+    return asJson(
+      `今回は「アイコン案」だけを出力してください。
+厳守:
+- icons は3案
+- 各案に title, content, iconJapanesePrompt, iconEnglishPrompt を含める
+- content は世界観、色、訴求意図を簡潔にまとめる
+- 画像プロンプトはそのまま生成に投げやすい精度で書く`,
+      {
+        type:'OBJECT',
+        required:['icons'],
+        properties:{
+          icons:{type:'ARRAY',items:{type:'OBJECT',required:['title','content','iconJapanesePrompt','iconEnglishPrompt'],properties:{title:{type:'STRING'},content:{type:'STRING'},iconJapanesePrompt:{type:'STRING'},iconEnglishPrompt:{type:'STRING'}}}}
+        }
+      },
+      2200, 0.62, 0.88
+    );
+  }
+
+  if(phase === 'prompt_setup'){
+    return asJson(
+      `今回は「GPTs作成画面に貼る作成項目一覧」だけを出力してください。
+厳守:
+- promptBlocks は1件だけ
+- title は分かりやすく
+- content はコピペ専用の作成項目一覧として、そのまま貼りやすく整理する`,
+      {
+        type:'OBJECT',
+        required:['promptBlocks'],
+        properties:{
+          promptBlocks:{type:'ARRAY',items:{type:'OBJECT',required:['title','content'],properties:{title:{type:'STRING'},content:{type:'STRING'}}}}
+        }
+      },
+      1800, 0.44, 0.82
+    );
+  }
+
+  if(phase === 'prompt_system'){
+    return asJson(
+      `今回は「本番運用レベルの高性能システムプロンプト」だけを出力してください。
+厳守:
+- promptBlocks は1件だけ
+- content は役割、目的、入力整理、必須ワークフロー、知識ファイル利用規則、出力ルール、品質チェック、不足情報時の動き、禁止事項、セルフレビューまで含める
+- 1500〜2600文字目安で、長すぎて壊れないよう密度重視でまとめる`,
+      {
+        type:'OBJECT',
+        required:['promptBlocks'],
+        properties:{
+          promptBlocks:{type:'ARRAY',items:{type:'OBJECT',required:['title','content'],properties:{title:{type:'STRING'},content:{type:'STRING'}}}}
+        }
+      },
+      3000, 0.42, 0.82
+    );
+  }
+
+  if(phase === 'prompt_starter'){
+    return asJson(
+      `今回は「初回ヒアリング設計 + 会話スターター + 質問テンプレ」だけを出力してください。
+厳守:
+- promptBlocks は1件だけ
+- 初回に聞くべき質問、会話スターター、精度を上げる追加質問テンプレまで含める`,
+      {
+        type:'OBJECT',
+        required:['promptBlocks'],
+        properties:{
+          promptBlocks:{type:'ARRAY',items:{type:'OBJECT',required:['title','content'],properties:{title:{type:'STRING'},content:{type:'STRING'}}}}
+        }
+      },
+      1800, 0.48, 0.84
+    );
+  }
+
+  if(phase === 'knowledge_1' || phase === 'knowledge_2' || phase === 'knowledge_3'){
+    const idx = phase.endsWith('_1') ? 1 : phase.endsWith('_2') ? 2 : 3;
+    return asJson(
+      `今回は「知識ファイル ${idx} 本目」だけを出力してください。
+厳守:
+- knowledgeFiles は1件だけ
+- content はそのまま知識ファイルとして投入できる本文
+- 説明ではなくファイル本文として完成させる
+- title と fileName は保存しやすく分かりやすい名前
+- 800〜1600文字目安`,
+      {
+        type:'OBJECT',
+        required:['knowledgeFiles'],
+        properties:{
+          knowledgeFiles:{type:'ARRAY',items:{type:'OBJECT',required:['title','fileName','content'],properties:{title:{type:'STRING'},fileName:{type:'STRING'},content:{type:'STRING'}}}}
+        }
+      },
+      2200, 0.46, 0.84
+    );
+  }
+
+  if(phase === 'manual_1'){
+    return asJson(
+      `今回は「購入者向け活用マニュアル」だけを出力してください。
+厳守:
+- manualFiles は1件だけ
+- 初期設定、使い方、入力例、活用のコツ、失敗しやすい点まで含める
+- 商品として渡せる密度だが、長すぎて壊れないよう整理する`,
+      {
+        type:'OBJECT',
+        required:['manualFiles'],
+        properties:{
+          manualFiles:{type:'ARRAY',items:{type:'OBJECT',required:['title','fileName','content'],properties:{title:{type:'STRING'},fileName:{type:'STRING'},content:{type:'STRING'}}}}
+        }
+      },
+      2600, 0.48, 0.84
+    );
+  }
+
+  if(phase === 'manual_2'){
+    return asJson(
+      `今回は「販売者向け高単価化マニュアル」だけを出力してください。
+厳守:
+- manualFiles は1件だけ
+- 売り方、価格設計、差別化、導線、改善サイクルまで含める
+- 商品として渡せる密度だが、長すぎて壊れないよう整理する`,
+      {
+        type:'OBJECT',
+        required:['manualFiles'],
+        properties:{
+          manualFiles:{type:'ARRAY',items:{type:'OBJECT',required:['title','fileName','content'],properties:{title:{type:'STRING'},fileName:{type:'STRING'},content:{type:'STRING'}}}}
+        }
+      },
+      2600, 0.5, 0.84
+    );
+  }
+
+  return asJson(
+    `今回は「マネタイズ設計・販売文・訴求軸」だけを出力してください。
+厳守:
+- monetize は単価設計、差別化、導線、販売勝ち筋を具体化
+- copyAngles と titleIdeas は各5件以上
+- productDescription は販売ページにそのまま貼れる密度
+- benefits / trustPhrases は短く強く
+- fitFor / notFitFor / ctaSoft / ctaStrong も具体的に`,
+    {
+      type:'OBJECT',
+      required:['monetize','copyAngles','titleIdeas','productDescription','benefits','fitFor','notFitFor','ctaSoft','ctaStrong','trustPhrases'],
+      properties:{
+        monetize:{type:'STRING'},
+        copyAngles:{type:'ARRAY',items:{type:'STRING'}},
+        titleIdeas:{type:'ARRAY',items:{type:'STRING'}},
+        productDescription:{type:'STRING'},
+        benefits:{type:'ARRAY',items:{type:'STRING'}},
+        fitFor:{type:'STRING'},
+        notFitFor:{type:'STRING'},
+        ctaSoft:{type:'STRING'},
+        ctaStrong:{type:'STRING'},
+        trustPhrases:{type:'ARRAY',items:{type:'STRING'}}
+      }
+    },
+    2400, 0.56, 0.86
+  );
 }
 
 async function callGeminiJson(apiKey, payload, label=''){ 
   let lastError = null;
-  for(let attempt = 0; attempt <= MAX_RETRIES; attempt++){
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    try{
-      const resp = await fetch(GENERATE_ENDPOINT(apiKey), {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
-      const text = await resp.text();
 
-      if(!resp.ok){
-        let message = text;
-        try{
-          const parsed = JSON.parse(text);
-          message = parsed?.error?.message || text;
-        }catch{}
-        const mapped = mapGeminiError(resp.status, message);
-        if(RETRYABLE_STATUS.has(resp.status) && attempt < MAX_RETRIES){
-          console.warn(`Gemini retry [${label}]`, resp.status, message);
-          const retryAfterHeader = Number(resp.headers.get('retry-after') || 0);
-          const waitMs = resp.status === 429 ? Math.max(backoffMs(attempt) + 1200, retryAfterHeader * 1000 || 0) : backoffMs(attempt);
-          await sleep(waitMs);
-          continue;
-        }
-        throw new Error(mapped);
-      }
+  for(const model of MODEL_CANDIDATES){
+    for(let attempt = 0; attempt <= MAX_RETRIES; attempt++){
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
       try{
-        return parseGeminiJsonEnvelope(text);
-      }catch(parseErr){
-        if(attempt < MAX_RETRIES && shouldRetryByMessage(parseErr.message)){
-          console.warn(`Gemini parse retry [${label}]`, parseErr.message);
+        const resp = await fetch(GENERATE_ENDPOINT(model, apiKey), {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(payload),
+          signal: controller.signal
+        });
+        const text = await resp.text();
+
+        if(!resp.ok){
+          let message = text;
+          try{
+            const parsed = JSON.parse(text);
+            message = parsed?.error?.message || text;
+          }catch{}
+
+          const lower = String(message || '').toLowerCase();
+          const unsupportedModel =
+            resp.status === 404 ||
+            (resp.status === 400 && (
+              lower.includes('model') ||
+              lower.includes('not found') ||
+              lower.includes('unsupported') ||
+              lower.includes('is not found')
+            ));
+
+          if(unsupportedModel){
+            lastError = new Error(`モデル ${model} はこのキーで使えないため、別モデルへ切り替えます。`);
+            break;
+          }
+
+          const mapped = mapGeminiError(resp.status, message);
+          if(RETRYABLE_STATUS.has(resp.status) && attempt < MAX_RETRIES){
+            console.warn(`Gemini retry [${label}]`, model, resp.status, message);
+            const retryAfterHeader = Number(resp.headers.get('retry-after') || 0);
+            const waitMs = resp.status === 429 ? Math.max(backoffMs(attempt) + 1200, retryAfterHeader * 1000 || 0) : backoffMs(attempt);
+            await sleep(waitMs);
+            continue;
+          }
+          throw new Error(mapped);
+        }
+
+        try{
+          const parsed = parseGeminiJsonEnvelope(text);
+          activeModel = model;
+          return parsed;
+        }catch(parseErr){
+          if(attempt < MAX_RETRIES && shouldRetryByMessage(parseErr.message)){
+            console.warn(`Gemini parse retry [${label}]`, model, parseErr.message);
+            await sleep(backoffMs(attempt));
+            continue;
+          }
+          throw parseErr;
+        }
+      }catch(err){
+        if(err?.name === 'AbortError'){
+          lastError = new Error('Geminiの応答がタイムアウトしました。入力を少し減らすか、少し時間を置いて再実行してください。');
+        }else if(err instanceof Error){
+          lastError = err;
+        }else{
+          lastError = new Error('Gemini APIへの通信に失敗しました。Wi-Fi/モバイル回線、APIキー、ブラウザの再読み込みを確認してください。');
+        }
+
+        if(attempt < MAX_RETRIES && shouldRetryByMessage(lastError.message)){
           await sleep(backoffMs(attempt));
           continue;
         }
-        throw parseErr;
+        break;
+      }finally{
+        clearTimeout(timer);
       }
-    }catch(err){
-      if(err?.name === 'AbortError'){
-        lastError = new Error('Geminiの応答がタイムアウトしました。入力を少し減らすか、少し時間を置いて再実行してください。');
-      }else if(err instanceof Error){
-        lastError = err;
-      }else{
-        lastError = new Error('Gemini APIへの通信に失敗しました。Wi-Fi/モバイル回線、APIキー、ブラウザの再読み込みを確認してください。');
-      }
-      if(attempt < MAX_RETRIES && shouldRetryByMessage(lastError.message)){
-        await sleep(backoffMs(attempt));
-        continue;
-      }
-      throw lastError;
-    }finally{
-      clearTimeout(timer);
     }
   }
+
   throw lastError || new Error('生成に失敗しました。');
 }
 
@@ -1763,6 +1795,40 @@ function normalizeObjectArray(arr, requiredKeys){
     for(const key of requiredKeys) base[key] = normalizeString(item?.[key]);
     return base;
   }).filter(item => Object.values(item).some(Boolean));
+}
+
+
+function mergeGeneratedData(prev, next){
+  const prevData = normalizeMergedData(prev || {});
+  const nextData = normalizeMergedData(next || {});
+  return {
+    docTitle: nextData.docTitle || prevData.docTitle,
+    analysis: nextData.analysis || prevData.analysis,
+    names: nextData.names.length ? nextData.names : prevData.names,
+    icons: nextData.icons.length ? nextData.icons : prevData.icons,
+    promptBlocks: [...prevData.promptBlocks, ...nextData.promptBlocks].filter((item, idx, arr) => {
+      const key = `${item.title}__${item.content}`;
+      return arr.findIndex(x => `${x.title}__${x.content}` === key) === idx;
+    }).slice(0, 3),
+    knowledgeFiles: [...prevData.knowledgeFiles, ...nextData.knowledgeFiles].filter((item, idx, arr) => {
+      const key = item.fileName || `${item.title}__${idx}`;
+      return arr.findIndex(x => (x.fileName || x.title) === key) === idx;
+    }).slice(0, 3),
+    manualFiles: [...prevData.manualFiles, ...nextData.manualFiles].filter((item, idx, arr) => {
+      const key = item.fileName || `${item.title}__${idx}`;
+      return arr.findIndex(x => (x.fileName || x.title) === key) === idx;
+    }).slice(0, 2),
+    monetize: nextData.monetize || prevData.monetize,
+    copyAngles: nextData.copyAngles.length ? nextData.copyAngles : prevData.copyAngles,
+    titleIdeas: nextData.titleIdeas.length ? nextData.titleIdeas : prevData.titleIdeas,
+    productDescription: nextData.productDescription || prevData.productDescription,
+    benefits: nextData.benefits.length ? nextData.benefits : prevData.benefits,
+    fitFor: nextData.fitFor || prevData.fitFor,
+    notFitFor: nextData.notFitFor || prevData.notFitFor,
+    ctaSoft: nextData.ctaSoft || prevData.ctaSoft,
+    ctaStrong: nextData.ctaStrong || prevData.ctaStrong,
+    trustPhrases: nextData.trustPhrases.length ? nextData.trustPhrases : prevData.trustPhrases
+  };
 }
 
 function normalizeMergedData(data){
@@ -1785,94 +1851,6 @@ function normalizeMergedData(data){
     ctaStrong: normalizeString(data?.ctaStrong),
     trustPhrases: normalizeArray(data?.trustPhrases).map(x => normalizeString(x)).filter(Boolean)
   };
-}
-
-function mergePhaseResult(base, patch){
-  const merged = normalizeMergedData(base || {});
-  const normalizedPatch = normalizeMergedData(patch || {});
-  const appendKeys = ['names','icons','promptBlocks','knowledgeFiles','manualFiles'];
-  for(const key of appendKeys){
-    if(normalizedPatch[key]?.length){
-      merged[key] = [...(merged[key] || []), ...normalizedPatch[key]];
-    }
-  }
-  const scalarKeys = ['docTitle','analysis','monetize','productDescription','fitFor','notFitFor','ctaSoft','ctaStrong'];
-  for(const key of scalarKeys){
-    if(normalizedPatch[key]) merged[key] = normalizedPatch[key];
-  }
-  const listKeys = ['copyAngles','titleIdeas','benefits','trustPhrases'];
-  for(const key of listKeys){
-    if(normalizedPatch[key]?.length){
-      merged[key] = normalizedPatch[key];
-    }
-  }
-  return normalizeMergedData(merged);
-}
-
-async function callForgePhase(apiKey, ctx, phase, currentData){
-  let lastError = null;
-  for(let attempt = 0; attempt <= MAX_RETRIES; attempt++){
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    try{
-      const resp = await fetch(BACKEND_ENDPOINT, {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({
-          apiKey: apiKey || '',
-          phaseId: phase.id,
-          ctx,
-          currentData: cloneWithStringLimit(currentData || {}, 4000),
-          appVersion: APP_VERSION
-        }),
-        signal: controller.signal
-      });
-      const text = await resp.text();
-      let parsed = null;
-      try{ parsed = text ? JSON.parse(text) : null; }catch{}
-
-      if(!resp.ok){
-        const message = parsed?.message || parsed?.error || text || `HTTP ${resp.status}`;
-        const err = new Error(message);
-        err.phaseId = phase.id;
-        err.status = resp.status;
-        if(RETRYABLE_STATUS.has(resp.status) && attempt < MAX_RETRIES){
-          await sleep(backoffMs(attempt));
-          continue;
-        }
-        throw err;
-      }
-
-      if(!parsed?.ok || !parsed?.data){
-        const err = new Error(parsed?.message || 'Workerから有効なデータが返りませんでした。');
-        err.phaseId = phase.id;
-        if(attempt < MAX_RETRIES){
-          await sleep(backoffMs(attempt));
-          continue;
-        }
-        throw err;
-      }
-
-      return normalizeMergedData(parsed.data);
-    }catch(err){
-      if(err?.name === 'AbortError'){
-        lastError = new Error(`フェーズ「${phase.label}」がタイムアウトしました。再実行すると保存済みフェーズから自動再開します。`);
-      }else if(err instanceof Error){
-        lastError = err;
-      }else{
-        lastError = new Error(`フェーズ「${phase.label}」の通信に失敗しました。`);
-      }
-      lastError.phaseId = phase.id;
-      if(attempt < MAX_RETRIES && shouldRetryByMessage(lastError.message)){
-        await sleep(backoffMs(attempt));
-        continue;
-      }
-      throw lastError;
-    }finally{
-      clearTimeout(timer);
-    }
-  }
-  throw lastError || new Error(`フェーズ「${phase.label}」で失敗しました。`);
 }
 
 function renderAllTabs(data){
@@ -2090,10 +2068,10 @@ function loadSample(){
   setChips('cg-media',['ココナラ','note','Brain','Threads・X']);
 }
 
-
 async function generate(){
   const apiKey=document.getElementById('apiKey').value.trim();
-  if(apiKey && !apiKey.startsWith('AIza')){showErr('Gemini APIキーを直接入力する場合は、Google AI Studioで発行した AIza... から始まるキーを入力してください。Worker側に秘密鍵を設定している場合は空欄でも実行できます。');return;}
+  if(!apiKey){showErr('Gemini APIキーを入力してください。');return;}
+  if(!apiKey.startsWith('AIza')){showErr('Gemini APIキーの形式が不正です。Google AI Studioで発行した AIza... から始まるキーを入力してください。');return;}
 
   const rawForm=collectForm();
   if(!rawForm.theme){showErr('GPTsのテーマを入力してください。');return;}
@@ -2101,10 +2079,11 @@ async function generate(){
 
   const requestForm = prepareFormForRequest(rawForm);
   const ctx = buildCtx(requestForm);
-  const fingerprint = makeStableFingerprint({pw: currentPw, form: requestForm, version: APP_VERSION});
+  const fingerprint = makeStableFingerprint({pw: currentPw, form: requestForm, models: MODEL_CANDIDATES, version: 'github-free-stable-v3'});
   let checkpoint = loadRunCheckpoint(fingerprint);
   let mergedData = checkpoint?.data ? normalizeMergedData(checkpoint.data) : {};
   const completed = new Set(Array.isArray(checkpoint?.completedPhases) ? checkpoint.completedPhases : []);
+  let currentPhase = null;
 
   hideErr();
   clearOutput();
@@ -2120,15 +2099,16 @@ async function generate(){
     }
 
     for(const phase of PHASE_PLAN){
+      currentPhase = phase;
       if(completed.has(phase.id)){
         setLoaderState(phase.progress, `${phase.label}（保存済みを再利用）`);
-        await sleep(140);
+        await sleep(160);
         continue;
       }
 
-      setLoaderState(phase.progress, phase.label);
-      const result = await callForgePhase(apiKey, ctx, phase, mergedData);
-      mergedData = mergePhaseResult(mergedData, result);
+      setLoaderState(phase.progress, `${phase.label}｜使用モデル: ${activeModel}`);
+      const result = await callGeminiJson(apiKey, buildPhasePayload(ctx, phase.id), phase.id);
+      mergedData = mergeGeneratedData(mergedData, result);
       completed.add(phase.id);
       saveRunCheckpoint({
         fingerprint,
@@ -2141,7 +2121,7 @@ async function generate(){
       await sleep(180);
     }
 
-    setLoaderState(98, '最終整形中');
+    setLoaderState(98, `最終整形中｜使用モデル: ${activeModel}`);
     const data = normalizeMergedData(mergedData);
     renderAllTabs(data);
     document.getElementById('output-title').textContent = data.docTitle || `${rawForm.theme} — 設計書`;
@@ -2151,11 +2131,10 @@ async function generate(){
     await addHistory(buildHistoryEntry(rawForm.theme, rawForm, data));
     clearRunCheckpoint();
   }catch(err){
-    const phaseMeta = findPhaseMeta(err?.phaseId || '');
     const message = err?.message || '生成中にエラーが発生しました。';
-    showErr(`${message}
+    const phaseText = currentPhase ? `失敗フェーズ: ${currentPhase.label}\n使用モデル: ${activeModel}\n\n` : '';
+    showErr(`${phaseText}${message}
 
-失敗フェーズ: ${phaseMeta.label || '不明'}
 同じ入力のまま再実行すると、保存できている途中フェーズから自動再開します。`);
   }finally{
     endProg();
@@ -2181,7 +2160,6 @@ window.addEventListener('load',()=>{
     if(logo) logo.classList.add('ready');
   }
 });
-
 </script>
 </body>
 </html>
